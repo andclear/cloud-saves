@@ -1,15 +1,20 @@
 {
-  "name": "data-sync",
+  "name": "sillytavern-cloud-saves",
   "version": "1.0.0",
-  "description": "这个插件允许你使用 Git 来同步 SillyTavern 的 `/data` 目录，方便在多个设备间共享角色、聊天记录和设置。",
+  "description": "SillyTavern的云存档插件，使用GitHub仓库管理存档。",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Your Name / AI Assistant",
+  "license": "MIT",
+  "keywords": [
+    "sillytavern",
+    "plugin",
+    "cloud",
+    "save",
+    "git",
+    "github"
+  ],
   "dependencies": {
-    "node-fetch": "^2.7.0"
+    "express": "^4.17.1",
+    "node-fetch": "^3.0.0"
   }
-}
+} 

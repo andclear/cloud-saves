@@ -1,1255 +1,1063 @@
-// 数据同步前端脚本
+// 云存档前端脚本
 document.addEventListener('DOMContentLoaded', function() {
-    // 初始化Bootstrap组件 (假设 window.bootstrap 已由主应用或CDN加载)
-    // No explicit initialization needed here if components are initialized via data attributes
-    
-    // 初始化界面元素
-    initUI();
-    
-    // 绑定按钮事件
-    bindEventListeners();
-    
-    // 加载配置
-    loadConfig();
-    
-    // 检查Git状态
-    checkGitStatus();
-    
-    // 检查GitHub授权状态
-    checkAuthStatus();
-});
-
-// CSRF令牌
-let csrfToken = '';
-
-// 获取CSRF令牌
-function getCSRFToken() {
-    const metaTag = document.querySelector('meta[name="csrf-token"]');
-    if (metaTag instanceof HTMLMetaElement) { 
-        const tokenFromMeta = metaTag.getAttribute('content');
-        if (tokenFromMeta) {
-            csrfToken = tokenFromMeta;
-            return Promise.resolve(csrfToken);
-        }
-    }
-    
-    // Fetch from the main application's endpoint
-    return fetch('/csrf-token') // Correct endpoint
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`获取CSRF令牌失败: ${response.status}`);
-            }
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                return response.json();
-            } else {
-                throw new Error('CSRF令牌响应不是有效的JSON');
-            }
-        })
-        .then(data => {
-            if (data && data.token && typeof data.token === 'string') { 
-                csrfToken = data.token;
-                let metaTagToUpdate = document.querySelector('meta[name="csrf-token"]');
-                if (!metaTagToUpdate) {
-                    metaTagToUpdate = document.createElement('meta');
-                    if (metaTagToUpdate instanceof HTMLMetaElement) {
-                         metaTagToUpdate.name = "csrf-token";
-                         if (document.head) {
-                             document.head.appendChild(metaTagToUpdate);
-                         } else {
-                             console.error('Cannot find document head to append CSRF meta tag');
-                             throw new Error('Document head not found'); 
-                         }
-                    } else {
-                         throw new Error('Failed to create meta tag element');
-                    }
-                }
-                if (metaTagToUpdate instanceof HTMLMetaElement) {
-                    metaTagToUpdate.setAttribute('content', csrfToken);
-                }
-                return csrfToken;
-            } else {
-                throw new Error('无法从响应中解析CSRF令牌或令牌格式无效');
-            }
-        })
-        .catch(error => {
-            console.error('获取CSRF令牌时出错:', error);
-            csrfToken = ''; 
-            throw error; 
-        });
-}
-
-// API请求函数
-// data parameter is expected to be an object for POST/PUT/PATCH, or null/undefined otherwise.
-async function apiRequest(endpoint, method = 'GET', data = null) { 
-    try {
-        if (!csrfToken) {
-             await getCSRFToken();
-        }
-        if (!csrfToken) {
-            throw new Error('CSRF Token is still empty after fetch attempt');
-        }
-    } catch (error) {
-        console.error('无法获取CSRF令牌，请求中止:', error);
-        showToast('错误', '无法获取安全令牌，请刷新页面重试', 'danger');
-        throw error instanceof Error ? error : new Error('CSRF Token acquisition failed');
-    }
-    
-    const options = {
-        method: method,
-        headers: {
-            'X-CSRF-Token': csrfToken
-        },
-        // 'same-origin' is the most common and secure default for credentials
-        credentials: 'same-origin'
-    };
-    
-    if (data && typeof data === 'object' && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
-        options.headers['Content-Type'] = 'application/json';
-        options.body = JSON.stringify(data);
-    }
-    
-    let response;
-    try {
-        response = await fetch(`/api/plugins/data-sync${endpoint}`, options);
-    } catch (networkError) {
-        console.error('网络请求错误:', networkError);
-        showToast('错误', '网络连接失败，请检查您的网络', 'danger');
-        throw networkError;
-    }
-    
-    if (!response.ok) {
-        let errorText = `请求失败，状态码: ${response.status}`;
-        try {
-             const bodyText = await response.text();
-             try {
-                 const errorJson = JSON.parse(bodyText);
-                 if (errorJson && errorJson.message) {
-                     errorText = `请求失败 (${response.status}): ${errorJson.message}`; // Include status in message
-                 } else if (bodyText) {
-                     errorText = `请求失败 (${response.status}): ${bodyText}`; // Include status in message
-                 }
-             } catch(parseError) {
-                 if (bodyText) { 
-                    errorText = `请求失败 (${response.status}): ${bodyText}`; // Include status in message
-                 }
-             }
-        } catch(readError) { 
-             console.warn('读取错误响应体失败:', readError);
-        }
-        const apiError = new Error(errorText); // Error message now contains status
-        showToast('错误', errorText, 'danger'); 
-        throw apiError; 
-    }
-    
-    const contentType = response.headers.get('content-type');
-    if (contentType && contentType.includes('application/json')) {
-        const text = await response.text();
-        try {
-            return text ? JSON.parse(text) : {}; 
-        } catch (parseError) {
-            console.error('无法解析JSON响应:', parseError, '响应体:', text);
-            showToast('错误', '收到无效的服务器响应', 'danger');
-            throw new Error('无效的JSON响应');
-        }
-    } else if (response.status === 204) { 
-        return {}; 
-    }
-    
-    try {
-         return await response.text();
-    } catch (readError) {
-        console.error('无法读取响应文本:', readError);
-        showToast('错误', '无法读取服务器响应', 'danger');
-        throw new Error('无法读取响应');
-    }
-}
-
-// 初始化UI
-function initUI() {
-    const autoSyncCheckbox = document.getElementById('auto_sync');
-    const syncIntervalContainer = document.getElementById('sync_interval_container');
-    
-    if (autoSyncCheckbox instanceof HTMLInputElement && syncIntervalContainer instanceof HTMLElement) {
-        syncIntervalContainer.style.display = autoSyncCheckbox.checked ? 'block' : 'none'; 
-        autoSyncCheckbox.addEventListener('change', function() {
-            syncIntervalContainer.style.display = this.checked ? 'block' : 'none';
-        });
-    } else {
-        console.warn('自动同步复选框或间隔容器未找到');
-    }
-    
-    const toggleTokenBtn = document.getElementById('toggle_token_visibility');
-    const tokenInput = document.getElementById('github_token_input');
-    
-    if (toggleTokenBtn instanceof HTMLButtonElement && tokenInput instanceof HTMLInputElement) {
-        toggleTokenBtn.addEventListener('click', function() {
-            const currentType = tokenInput.getAttribute('type');
-            const newType = currentType === 'password' ? 'text' : 'password';
-            tokenInput.setAttribute('type', newType);
-            const iconElement = this.querySelector('i'); 
-            if (iconElement instanceof HTMLElement) { 
-                 iconElement.className = newType === 'password' ? 'bi bi-eye' : 'bi bi-eye-slash';
-            }
-        });
-    } else {
-        console.warn('令牌可见性切换按钮或输入框未找到');
-    }
-    
-    // 每30秒检查一次撤销按钮状态
-    checkUndoAvailability();
-    setInterval(checkUndoAvailability, 30000);
-}
-
-// 绑定事件监听器
-function bindEventListeners() {
-    const bindClick = (id, handler) => {
-        const element = document.getElementById(id);
-        if (element instanceof HTMLElement) { 
-            element.addEventListener('click', handler);
-        } else {
-            console.warn(`无法绑定点击事件: 未找到ID为 '${id}' 的元素`);
-        }
-    };
-
-    bindClick('save_config_btn', saveConfig);
-    bindClick('init_repo_btn', initRepo);
-    bindClick('sync_to_remote_btn', syncToRemote);
-    bindClick('sync_from_remote_btn', syncFromRemote);
-    bindClick('authorize_btn', authorizeGitHub);
-    bindClick('set_token_btn', setGitHubToken);
-    bindClick('undo_sync_btn', undoLastSync);
-    bindClick('force_push_btn', forcePush);
-    bindClick('force_pull_btn', forcePull);
-    
-    checkOAuthCallback();
-}
-
-// 加载配置
-async function loadConfig() {
-    try {
-        showSpinner('git_status', true, true); 
-        const config = await apiRequest('/config');
-        
-        const repoUrlInput = document.getElementById('repo_url');
-        const branchInput = document.getElementById('branch');
-        const autoSyncCheckbox = document.getElementById('auto_sync');
-        const syncIntervalContainer = document.getElementById('sync_interval_container');
-        const syncIntervalInput = document.getElementById('sync_interval');
-        const lastSyncTimeElement = document.getElementById('last_sync_time');
-
-        if (config && typeof config === 'object' && // Ensure config is an object
-            repoUrlInput instanceof HTMLInputElement && 
-            branchInput instanceof HTMLInputElement && 
-            autoSyncCheckbox instanceof HTMLInputElement && 
-            syncIntervalContainer instanceof HTMLElement && 
-            syncIntervalInput instanceof HTMLInputElement && 
-            lastSyncTimeElement instanceof HTMLElement) {
-                
-            repoUrlInput.value = config.repoUrl || '';
-            branchInput.value = config.branch || 'main';
-            autoSyncCheckbox.checked = !!config.autoSync; 
-            syncIntervalContainer.style.display = autoSyncCheckbox.checked ? 'block' : 'none';
-            syncIntervalInput.value = config.syncInterval || '60';
-            
-            if (config.lastSync) {
-                const lastSyncDate = new Date(config.lastSync);
-                lastSyncTimeElement.textContent = !isNaN(lastSyncDate.getTime()) 
-                    ? lastSyncDate.toLocaleString() 
-                    : '无效日期';
-            } else {
-                lastSyncTimeElement.textContent = '从未同步';
-            }
-            
-            updateTokenStatus(!!config.hasToken); 
-        } else {
-            console.warn('加载配置时部分UI元素未找到或配置数据无效');
-        }
-    } catch (error) {
-        console.error('加载配置失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `加载配置失败: ${message}`, 'danger');
-    } finally {
-        // Let checkGitStatus handle the final spinner state for git_status
-    }
-}
-
-// 保存配置
-async function saveConfig() {
-    const repoUrlInput = document.getElementById('repo_url');
-    const branchInput = document.getElementById('branch');
-    const autoSyncCheckbox = document.getElementById('auto_sync');
-    const syncIntervalInput = document.getElementById('sync_interval');
-
-    if (!(repoUrlInput instanceof HTMLInputElement) || 
-        !(branchInput instanceof HTMLInputElement) || 
-        !(autoSyncCheckbox instanceof HTMLInputElement) || 
-        !(syncIntervalInput instanceof HTMLInputElement)) {
-        console.error('无法找到配置表单元素');
-        showToast('错误', '无法保存配置，请刷新页面重试', 'danger');
-        return;
-    }
-
-    try {
-        const syncIntervalValue = parseInt(syncIntervalInput.value, 10);
-        if (isNaN(syncIntervalValue) || syncIntervalValue < 5) {
-            showToast('警告', '同步间隔必须是大于或等于5的整数', 'warning');
-            syncIntervalInput.focus(); 
-            return; 
-        }
-
-        const configData = {
-            repoUrl: repoUrlInput.value.trim(), 
-            branch: branchInput.value.trim() || 'main', 
-            autoSync: autoSyncCheckbox.checked,
-            syncInterval: syncIntervalValue
-        };
-        
-        showSpinner('save_config_btn', true);
-        // Explicitly pass the object data here for clarity
-        await apiRequest('/config', 'POST', configData); 
-        showToast('成功', '配置保存成功', 'success');
-        
-        await checkGitStatus(); 
-    } catch (error) {
-        console.error('保存配置失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `保存配置失败: ${message}`, 'danger');
-    } finally {
-        showSpinner('save_config_btn', false);
-    }
-}
-
-// 检查Git状态
-async function checkGitStatus() {
-    const statusElement = document.getElementById('git_status');
-    if (!(statusElement instanceof HTMLElement)) {
-        console.warn('Git状态元素未找到');
-        return; 
-    }
-
-    let isInitialized = false; 
-    try {
-        showSpinner('git_status', true, true); 
-        const status = await apiRequest('/git/status');
-        
-        if (status && typeof status === 'object') {
-            let statusHtml = '';
-            isInitialized = !!status.initialized;
-            
-            if (status.initialized) {
-                statusHtml = `<span class="badge text-bg-success status-badge">已初始化</span>`; 
-            } else {
-                statusHtml = `<span class="badge text-bg-warning status-badge">未初始化</span>`;
-            }
-            
-            if (Array.isArray(status.changes) && status.changes.length > 0) {
-                statusHtml += ` <span class="badge text-bg-info status-badge">${status.changes.length}个文件有变化</span>`;
-            }
-            
-            statusElement.innerHTML = statusHtml;
-        } else {
-             statusElement.innerHTML = `<span class="badge text-bg-secondary status-badge">状态未知</span>`;
-        }
-    } catch (error) {
-        console.error('检查Git状态失败:', error);
-        // Check the error message for status code if needed (removed direct status property)
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes('404')) { // Simple check for 404 in message
-             statusElement.innerHTML = `<span class="badge text-bg-warning status-badge">未初始化</span>`;
-             isInitialized = false;
-        } else {
-            statusElement.innerHTML = `<span class="badge text-bg-danger status-badge">检查错误</span>`;
-            isInitialized = false; 
-        }
-    } finally {
-        updateButtonsState(isInitialized);
-        showSpinner('git_status', false, true);
-    }
-}
-
-// 初始化仓库
-async function initRepo() {
-    try {
-        showSpinner('init_repo_btn', true);
-        await apiRequest('/git/init', 'POST');
-        showToast('成功', '仓库初始化成功', 'success');
-        await checkGitStatus(); 
-    } catch (error) {
-        console.error('初始化仓库失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `初始化仓库失败: ${message}`, 'danger');
-    } finally {
-        showSpinner('init_repo_btn', false);
-    }
-}
-
-// 同步到远程
-async function syncToRemote() {
-    try {
-        showSpinner('sync_to_remote_btn', true);
-        
-        // 发起同步请求
-        const response = await apiRequest('/git/sync/push', 'POST');
-        
-        // 检查是否有警告
-        if (response && response.warning === 'local_state_not_restored') {
-            showToast('警告', '同步成功，但无法恢复本地状态。您的更改保存在stash中。请手动恢复。', 'warning');
-        } else {
-            showToast('成功', '成功同步到远程仓库', 'success');
-        }
-        
-        // 检查撤销可用性
-        if (response && response.undoAvailable) {
-            updateUndoButton('push', true);
-        }
-        
-        await Promise.all([
-            checkGitStatus(),
-            loadConfig() 
-        ]);
-    } catch (error) {
-        console.error('同步到远程失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        
-        // 特殊处理需要用户干预的错误 (检查状态码 409)
-        if (message.includes('(409)')) { // 修改判断条件，只检查状态码
-            // 检查是合并冲突还是非快进
-            if (message.includes('合并冲突') || message.toLowerCase().includes('merge conflict')) { // 保留对消息内容的检查以区分不同 409
-                 await handleMergeConflict();
-            } else if (message.includes('非快进') || message.toLowerCase().includes('non_fast_forward') || message.toLowerCase().includes('updates were rejected')) {
-                 await handleNonFastForward();
-            } else {
-                // 未知类型的 409 错误，也显示通用冲突处理
-                console.warn('Unknown 409 conflict type, showing generic merge conflict handler:', message);
-                await handleMergeConflict(); 
-            }
-        } 
-        else {
-            showToast('错误', `同步到远程失败: ${message}`, 'danger');
-        }
-    } finally {
-        showSpinner('sync_to_remote_btn', false);
-    }
-}
-
-// 处理非快进错误
-async function handleNonFastForward() {
-    return new Promise((resolve) => {
-        showConfirmDialog({
-            title: '推送被拒绝',
-            message: `远程仓库包含您本地没有的更新。请选择操作：`,
-            confirmText: '强制推送',
-            cancelText: '取消',
-            type: 'warning',
-            confirmButtonClass: 'btn-danger'
-        }).then(async (result) => {
-            if (result) {
-                // 用户选择强制推送
-                try {
-                    showSpinner('sync_to_remote_btn', true);
-                    showToast('信息', '正在强制推送...', 'info');
-                    
-                    const result = await apiRequest('/git/sync/force-overwrite-remote', 'POST');
-                    showToast('成功', '强制推送成功', 'success');
-                    
-                    await Promise.all([
-                        checkGitStatus(),
-                        loadConfig()
-                    ]);
-                } catch (error) {
-                    console.error('强制推送失败:', error);
-                    const errMsg = error instanceof Error ? error.message : String(error);
-                    showToast('错误', `强制推送失败: ${errMsg}`, 'danger');
-                } finally {
-                    showSpinner('sync_to_remote_btn', false);
-                    resolve('force-push');
-                }
-            } else {
-                // 用户取消
-                showToast('信息', '推送已取消，建议先进行同步拉取', 'info');
-                resolve('cancel');
-            }
-        });
-    });
-}
-
-// 从远程同步
-async function syncFromRemote() {
-    try {
-        showSpinner('sync_from_remote_btn', true);
-        
-        // 发起同步请求（现在默认使用合并策略）
-        const response = await apiRequest('/git/sync/pull', 'POST');
-        
-        showToast('成功', '成功从远程仓库同步', 'success');
-        
-        // 检查撤销可用性
-        if (response && response.undoAvailable) {
-            updateUndoButton('pull', true);
-        }
-        
-        await Promise.all([
-            checkGitStatus(),
-            loadConfig() 
-        ]);
-    } catch (error) {
-        console.error('从远程同步失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        
-        // 特殊处理需要用户干预的错误 (检查状态码 409)
-        if (message.includes('(409)')) { // 修改判断条件，只检查状态码
-            // 假定 pull 操作的 409 都是合并冲突
-            await handleMergeConflict();
-        } else {
-            showToast('错误', `从远程同步失败: ${message}`, 'danger');
-        }
-    } finally {
-        showSpinner('sync_from_remote_btn', false);
-    }
-}
-
-// 处理合并冲突
-async function handleMergeConflict() {
-    const dialogElement = document.getElementById('confirmDialog');
-    if (!(dialogElement instanceof HTMLElement)) {
-        console.error('确认对话框元素未找到');
-        showToast('错误', '无法显示冲突解决对话框，请刷新页面重试', 'danger');
-        return;
-    }
-
-    // 设置对话框内容
-    const titleElement = document.getElementById('confirmDialogLabel');
-    const messageElement = document.getElementById('confirm-dialog-message');
-    const confirmButton = document.getElementById('confirm-dialog-confirm-btn');
-    const cancelButton = document.getElementById('confirm-dialog-cancel-btn');
-    const iconElement = document.getElementById('confirm-dialog-icon');
-    const modalFooter = confirmButton?.parentElement;
-
-    // 创建"以本地覆盖远程"按钮
-    const overwriteRemoteButton = document.createElement('button');
-    overwriteRemoteButton.type = 'button';
-    overwriteRemoteButton.className = 'btn btn-warning';
-    overwriteRemoteButton.textContent = '以本地覆盖远程';
-    overwriteRemoteButton.id = 'overwrite-remote-btn';
-
-    if (titleElement instanceof HTMLElement) {
-        titleElement.textContent = '合并冲突';
-    }
-    if (messageElement instanceof HTMLElement) {
-        messageElement.innerHTML = `
-            <p>同步过程中发生<strong>合并冲突</strong>！</p>
-            <p>请选择如何解决此冲突：</p>
-            <ul>
-                <li><strong>以远程覆盖本地</strong>：放弃本地更改，完全采用远程版本</li>
-                <li><strong>以本地覆盖远程</strong>：保留本地更改，强制推送到远程</li>
-                <li><strong>取消同步</strong>：保持当前状态，稍后手动解决</li>
-            </ul>
-        `;
-    }
-    if (confirmButton instanceof HTMLElement) {
-        confirmButton.textContent = '以远程覆盖本地';
-        confirmButton.className = 'btn btn-danger';
-    }
-    if (cancelButton instanceof HTMLElement) {
-        cancelButton.textContent = '取消同步';
-        cancelButton.className = 'btn btn-secondary';
-    }
-    if (iconElement instanceof HTMLElement) {
-        iconElement.innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 2.5rem;"></i>';
-    }
-    
-    // 添加"以本地覆盖远程"按钮到对话框
-    if (modalFooter instanceof HTMLElement && confirmButton && cancelButton) {
-        // 移除之前可能存在的按钮
-        const existingButton = document.getElementById('overwrite-remote-btn');
-        if (existingButton) {
-            existingButton.remove();
-        }
-        
-        // 在确认和取消按钮之间插入新按钮
-        modalFooter.insertBefore(overwriteRemoteButton, cancelButton);
-    }
-
-    // 显示对话框
-    let dialog = null;
-    if (typeof window.bootstrap !== 'undefined' && typeof window.bootstrap.Modal === 'function') {
-        try {
-            console.log('[handleMergeConflict] Attempting to initialize Bootstrap modal for #confirmDialog');
-            dialog = new window.bootstrap.Modal(dialogElement);
-            console.log('[handleMergeConflict] Modal initialized, attempting to show...');
-            dialog.show();
-            console.log('[handleMergeConflict] Modal show() called.');
-        } catch (modalError) {
-             console.error('[handleMergeConflict] Error initializing or showing Bootstrap modal:', modalError);
-             showToast('错误', '无法初始化或显示冲突对话框', 'danger');
-             // 如果模态框显示失败，直接返回，避免后续逻辑出错
-             // 可以考虑 resolve('error') 或 reject()，但这里简单返回
-             return;
-        }
-    } else {
-        console.error('Bootstrap Modal 组件未找到');
-        showToast('错误', '无法显示冲突解决对话框', 'danger');
-        return; // Bootstrap 未加载，直接返回
-    }
-
-    // 等待用户选择
-    return new Promise((resolve) => {
-        const handleOverwriteLocal = async () => {
-            dialog.hide();
-            cleanupEventListeners();
-            
-            try {
-                showSpinner('sync_from_remote_btn', true);
-                showToast('信息', '正在以远程覆盖本地...', 'info');
-                
-                const result = await apiRequest('/git/sync/force-overwrite-local', 'POST');
-                showToast('成功', '已成功用远程内容覆盖本地', 'success');
-                
-                await Promise.all([
-                    checkGitStatus(),
-                    loadConfig()
-                ]);
-            } catch (error) {
-                console.error('强制覆盖本地失败:', error);
-                const errMsg = error instanceof Error ? error.message : String(error);
-                showToast('错误', `强制覆盖本地失败: ${errMsg}`, 'danger');
-            } finally {
-                showSpinner('sync_from_remote_btn', false);
-                resolve('overwrite-local');
-            }
-        };
-
-        const handleOverwriteRemote = async () => {
-            dialog.hide();
-            cleanupEventListeners();
-            
-            try {
-                showSpinner('sync_from_remote_btn', true);
-                showToast('信息', '正在以本地覆盖远程...', 'info');
-                
-                const result = await apiRequest('/git/sync/force-overwrite-remote', 'POST');
-                showToast('成功', '已成功用本地内容覆盖远程', 'success');
-                
-                await Promise.all([
-                    checkGitStatus(),
-                    loadConfig()
-                ]);
-            } catch (error) {
-                console.error('强制覆盖远程失败:', error);
-                const errMsg = error instanceof Error ? error.message : String(error);
-                showToast('错误', `强制覆盖远程失败: ${errMsg}`, 'danger');
-            } finally {
-                showSpinner('sync_from_remote_btn', false);
-                resolve('overwrite-remote');
-            }
-        };
-
-        const handleCancel = () => {
-            dialog.hide();
-            cleanupEventListeners();
-            showToast('信息', '同步已取消', 'info');
-            resolve('cancel');
-        };
-
-        // 处理模态框隐藏事件
-        const hiddenHandler = () => {
-            cleanupEventListeners();
-            resolve('cancel');
-        };
-
-        // 清理事件监听器
-        const cleanupEventListeners = () => {
-            if (confirmButton instanceof HTMLElement) {
-                confirmButton.removeEventListener('click', handleOverwriteLocal);
-            }
-            if (overwriteRemoteButton instanceof HTMLElement) {
-                overwriteRemoteButton.removeEventListener('click', handleOverwriteRemote);
-            }
-            if (cancelButton instanceof HTMLElement) {
-                cancelButton.removeEventListener('click', handleCancel);
-            }
-            dialogElement.removeEventListener('hidden.bs.modal', hiddenHandler);
-        };
-
-        // 添加事件监听器
-        if (confirmButton instanceof HTMLElement) {
-            confirmButton.addEventListener('click', handleOverwriteLocal);
-        }
-        overwriteRemoteButton.addEventListener('click', handleOverwriteRemote);
-        if (cancelButton instanceof HTMLElement) {
-            cancelButton.addEventListener('click', handleCancel);
-        }
-        dialogElement.addEventListener('hidden.bs.modal', hiddenHandler);
-    });
-}
-
-// 设置GitHub令牌
-async function setGitHubToken() {
-    const tokenInput = document.getElementById('github_token_input');
-    if (!(tokenInput instanceof HTMLInputElement)) {
-        console.warn('GitHub令牌输入框未找到');
-        return;
-    }
-
-    const token = tokenInput.value.trim();
-    if (!token) {
-        showToast('警告', '请输入GitHub令牌', 'warning');
-        tokenInput.focus();
-        return;
-    }
-        
-    try {
-        showSpinner('set_token_btn', true);
-        // Ensure data is passed as an object
-        await apiRequest('/auth/token', 'POST', { token: token }); 
-        showToast('成功', 'GitHub令牌设置成功', 'success');
-        updateTokenStatus(true);
-        await checkAuthStatus();
-        tokenInput.value = ''; 
-        
-        // Attempt to close the modal using standard checks
-        if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
-            const tokenModalElement = document.getElementById('tokenModal');
-            if (tokenModalElement) {
-                 // Use window.bootstrap directly
-                 const tokenModalInstance = window.bootstrap.Modal.getInstance(tokenModalElement); 
-                 if (tokenModalInstance) {
-                     tokenModalInstance.hide();
-                 }
-            } else {
-                 console.warn('令牌模态框元素未找到');
-            }
-        } else {
-             console.warn('Bootstrap Modal component not available to close modal.');
-        }
-    } catch (error) {
-        console.error('设置GitHub令牌失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `设置GitHub令牌失败: ${message}`, 'danger');
-    } finally {
-        showSpinner('set_token_btn', false);
-    }
-}
-
-// 更新令牌状态
-function updateTokenStatus(hasToken) {
-    const tokenStatus = document.getElementById('github_token_status');
-    if (tokenStatus instanceof HTMLElement) {
-        tokenStatus.innerHTML = hasToken 
-            ? `<span class="badge text-bg-success status-badge">已设置</span>` 
-            : `<span class="badge text-bg-danger status-badge">未设置</span>`;
-    }
-}
-
-// 更新按钮状态 (基于仓库是否初始化)
-function updateButtonsState(isRepoInitialized) {
-    const initRepoBtn = document.getElementById('init_repo_btn');
-    const syncToRemoteBtn = document.getElementById('sync_to_remote_btn');
-    const syncFromRemoteBtn = document.getElementById('sync_from_remote_btn');
-    const forcePushBtn = document.getElementById('force_push_btn');
-    const forcePullBtn = document.getElementById('force_pull_btn');
-
-    // 始终启用初始化按钮
-    if (initRepoBtn instanceof HTMLButtonElement) {
-        initRepoBtn.disabled = false; 
-    }
-    // 其他按钮依赖于仓库初始化状态
-    const disableIfNotInit = !isRepoInitialized;
-    if (syncToRemoteBtn instanceof HTMLButtonElement) {
-        syncToRemoteBtn.disabled = disableIfNotInit;
-    }
-    if (syncFromRemoteBtn instanceof HTMLButtonElement) {
-        syncFromRemoteBtn.disabled = disableIfNotInit;
-    }
-    if (forcePushBtn instanceof HTMLButtonElement) {
-        forcePushBtn.disabled = disableIfNotInit;
-    }
-    if (forcePullBtn instanceof HTMLButtonElement) {
-        forcePullBtn.disabled = disableIfNotInit;
-    }
-}
-
-// 授权GitHub
-function authorizeGitHub() {
-    window.location.href = '/api/plugins/data-sync/auth/github/authorize';
-}
-
-// 检查授权状态
-async function checkAuthStatus() {
-    const authStatusElement = document.getElementById('auth_status');
-    const authorizeBtn = document.getElementById('authorize_btn');
-    if (!(authStatusElement instanceof HTMLElement)) {
-         console.warn('授权状态元素未找到');
-         return;
-    }
-
+    // 全局变量
     let isAuthorized = false;
-    try {
-        const status = await apiRequest('/auth/status');
-        
-        if (status && typeof status === 'object' && status.authorized) {
-            isAuthorized = true;
-            authStatusElement.innerHTML = 
-                `<span class="badge text-bg-success status-badge">已授权</span> ${status.username || ''}`;
-        } else {
-            authStatusElement.innerHTML = 
-                `<span class="badge text-bg-warning status-badge">未授权</span>`;
-        }
-    } catch (error) {
-        console.error('检查授权状态失败:', error);
-        authStatusElement.innerHTML = `<span class="badge text-bg-danger status-badge">检查错误</span>`;
-        isAuthorized = false; 
-    } finally {
-         if (authorizeBtn instanceof HTMLButtonElement) {
-             authorizeBtn.disabled = isAuthorized;
-         }
-    }
-}
+    let currentSaves = [];
+    let confirmCallback = null;
+    let renameTarget = null;
+    let autoSaveTimer = null; // 新增：定时器ID
+    let currentAutoSaveConfig = {}; // 新增：存储当前定时存档配置
 
-// 检查OAuth回调
-function checkOAuthCallback() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    const state = urlParams.get('state');
-    
-    if (code && state) {
-        window.history.replaceState({}, document.title, window.location.pathname);
-        handleOAuthCallback(code, state);
-    }
-}
+    // 获取DOM元素引用
+    const authSection = document.getElementById('auth-section');
+    const authForm = document.getElementById('auth-form');
+    const authStatus = document.getElementById('auth-status');
+    const repoUrlInput = document.getElementById('repo-url');
+    const githubTokenInput = document.getElementById('github-token');
+    const displayNameInput = document.getElementById('display-name');
+    const branchInput = document.getElementById('branch-input');
+    const configureBtn = document.getElementById('configure-btn');
+    const authorizeBtn = document.getElementById('authorize-btn');
+    const logoutBtn = document.getElementById('logout-btn');
 
-// 处理OAuth回调
-async function handleOAuthCallback(code, state) {
-    try {
-        showToast('信息', '正在处理GitHub授权...', 'info');
-        // Ensure data is passed as an object
-        const result = await apiRequest('/auth/github/callback', 'POST', { code: code, state: state }); 
-        
-        if (result && result.success) {
-            showToast('成功', 'GitHub授权成功', 'success');
-            await checkAuthStatus(); 
-        } else {
-            const message = (result && result.message) ? result.message : '未知错误';
-            showToast('错误', `授权失败: ${message}`, 'danger');
-        }
-    } catch (error) {
-        console.error('处理OAuth回调失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `授权处理失败: ${message}`, 'danger');
-    }
-}
+    const createSaveSection = document.getElementById('create-save-section');
+    const saveNameInput = document.getElementById('save-name');
+    const saveDescriptionInput = document.getElementById('save-description');
+    const createSaveBtn = document.getElementById('create-save-btn');
 
-// 显示加载中的旋转器
-function showSpinner(elementId, show, isStatusCheck = false) { 
-    const element = document.getElementById(elementId);
-    if (!(element instanceof HTMLElement)) return; 
-    
-    const spinnerHtml = `
-        <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"> 
-            <span class="visually-hidden">加载中...</span>
-        </div>
-    `;
+    const savesSection = document.getElementById('saves-section');
+    const savesContainer = document.getElementById('saves-container');
+    const noSavesMessage = document.getElementById('no-saves-message');
+    const refreshSavesBtn = document.getElementById('refresh-saves-btn');
+    const searchBox = document.getElementById('search-box');
+    const sortSelector = document.getElementById('sort-selector');
 
-    if (show) {
-        const currentContent = element.innerHTML.trim();
-        if (!element.hasAttribute('data-original-content') && !currentContent.includes('spinner-border')) {
-             element.setAttribute('data-original-content', currentContent);
-        }
-        
-        if (isStatusCheck) {
-            const statusText = element.hasAttribute('data-original-content') && element.getAttribute('data-original-content') 
-                               ? element.getAttribute('data-original-content') 
-                               : '检查中...';
-             element.innerHTML = spinnerHtml + `<span class="ms-1">${statusText}</span>`;
-        } else {
-             element.innerHTML = spinnerHtml + '<span class="ms-1">处理中...</span>';
-        }
-        
-        if (element instanceof HTMLButtonElement) {
-             element.disabled = true;
-        }
-    } else {
-        const originalContent = element.getAttribute('data-original-content');
-        if (originalContent !== null) { 
-            element.innerHTML = originalContent;
-            element.removeAttribute('data-original-content');
-        } else if (isStatusCheck) {
-             element.innerHTML = '<span class="text-muted">-</span>';
-        } 
-        
-        if (element instanceof HTMLButtonElement) {
-             element.disabled = false;
-        }
-    }
-}
+    const stashNotification = document.getElementById('stash-notification');
+    const applyStashBtn = document.getElementById('apply-stash-btn');
+    const discardStashBtn = document.getElementById('discard-stash-btn');
 
-// 显示消息提示
-function showToast(title, message, type) {
-    const toastContainer = document.getElementById('toast-container');
-    if (!(toastContainer instanceof HTMLElement)) {
-        console.error('Toast container not found!');
-        return;
-    }
-    
-    const safeTitle = String(title).replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const safeMessage = String(message).replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    // Basic validation for type to prevent unexpected classes
-    const allowedTypes = ['success', 'info', 'warning', 'danger', 'primary', 'secondary', 'light', 'dark'];
-    const safeType = allowedTypes.includes(type) ? type : 'secondary'; // Default to secondary
+    const gitStatus = document.getElementById('git-status');
+    const changesStatus = document.getElementById('changes-status');
+    const changesCount = document.getElementById('changes-count');
+    const currentSaveStatus = document.getElementById('current-save-status');
 
-    const toastId = 'toast-' + Date.now();
-    const toastHtml = `
-        <div id="${toastId}" class="toast fade" role="alert" aria-live="assertive" aria-atomic="true">
-            <div class="toast-header text-white text-bg-${safeType}">
-                <strong class="me-auto">${safeTitle}</strong>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast" aria-label="关闭"></button>
-            </div>
-            <div class="toast-body">
-                ${safeMessage}
-            </div>
-        </div>
-    `;
-    
-    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
-    
-    const toastElement = document.getElementById(toastId);
-    
-    // Check if Bootstrap and Toast constructor are available using standard checks
-    if (toastElement instanceof HTMLElement && 
-        typeof window.bootstrap !== 'undefined' && 
-        typeof window.bootstrap.Toast === 'function') {
-            
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const loadingMessage = document.getElementById('loading-message');
+
+    const renameModal = new bootstrap.Modal(document.getElementById('renameModal'));
+    const renameTagNameInput = document.getElementById('rename-tag-name');
+    const renameNewNameInput = document.getElementById('rename-new-name');
+    const renameDescriptionInput = document.getElementById('rename-description');
+    const confirmRenameBtn = document.getElementById('confirm-rename-btn');
+
+    const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+    const confirmMessageText = document.getElementById('confirm-message');
+    const confirmActionBtn = document.getElementById('confirm-action-btn');
+
+    const diffModal = new bootstrap.Modal(document.getElementById('diffModal'));
+    const diffSummary = document.getElementById('diff-summary');
+    const diffFiles = document.getElementById('diff-files');
+
+    // 新增：定时存档 UI 元素
+    const autoSaveSection = document.getElementById('auto-save-section');
+    const autoSaveEnabledSwitch = document.getElementById('auto-save-enabled');
+    const autoSaveOptionsDiv = document.getElementById('auto-save-options');
+    const autoSaveIntervalInput = document.getElementById('auto-save-interval');
+    const autoSaveTargetTagInput = document.getElementById('auto-save-target-tag');
+    const saveAutoSaveSettingsBtn = document.getElementById('save-auto-save-settings-btn');
+
+    // API调用工具函数
+    async function apiCall(endpoint, method = 'GET', data = null) {
+        const options = {
+            method: method,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        };
+
+        // 对于非GET请求，先获取CSRF令牌
+        if (method !== 'GET' && method !== 'HEAD') {
+            try {
+                const csrfResponse = await fetch('/csrf-token');
+                if (!csrfResponse.ok) {
+                    throw new Error(`获取CSRF令牌失败: ${csrfResponse.statusText}`);
+                }
+                const csrfData = await csrfResponse.json();
+                if (!csrfData || !csrfData.token) {
+                    throw new Error('无效的CSRF令牌响应');
+                }
+                options.headers['X-CSRF-Token'] = csrfData.token;
+            } catch (csrfError) {
+                console.error('无法获取或设置CSRF令牌:', csrfError);
+                showToast('错误', `无法执行操作，获取安全令牌失败: ${csrfError.message}`, 'error');
+                throw csrfError; // 阻止后续请求
+            }
+        }
+
+        if (data && (method === 'POST' || method === 'PUT')) {
+            options.body = JSON.stringify(data);
+        }
+
         try {
-             // Use window.bootstrap directly
-            const toast = new window.bootstrap.Toast(toastElement, { 
-                autohide: true, 
-                delay: 5000 
-            });
-            toast.show();
+            const response = await fetch(`/api/plugins/cloud-saves/${endpoint}`, options);
+            // 检查是否是 CSRF 错误导致的 HTML 响应
+            if (!response.ok && response.headers.get('content-type')?.includes('text/html')) {
+                 if (response.status === 403) {
+                     throw new Error('认证或权限错误 (403 Forbidden)。可能是CSRF令牌问题或GitHub Token权限不足。');
+                 } else {
+                    throw new Error(`请求失败，服务器返回了非JSON响应 (状态码: ${response.status})`);
+                 }
+            }
             
-            toastElement.addEventListener('hidden.bs.toast', function handleHide() {
-                toastElement.removeEventListener('hidden.bs.toast', handleHide);
-                if (toastElement.parentNode) {
-                    toastElement.parentNode.removeChild(toastElement);
+            const result = await response.json();
+            
+            if (!response.ok) {
+                // 使用后端返回的 message 或构造一个
+                throw new Error(result.message || `请求失败，状态码: ${response.status}`); 
+            }
+            
+            return result;
+        } catch (error) {
+            console.error(`API调用失败 (${endpoint}):`, error);
+            // 避免重复显示CSRF令牌获取失败的Toast
+            if (!error.message.includes('安全令牌失败')) {
+                 showToast('错误', `操作失败: ${error.message}`, 'error');
+            }
+            throw error;
+        }
+    }
+
+    // 加载/显示函数
+    function showLoading(message = '正在加载...') {
+        loadingMessage.textContent = message;
+        loadingOverlay.style.display = 'flex';
+    }
+
+    function hideLoading() {
+        loadingOverlay.style.display = 'none';
+    }
+
+    function showToast(title, message, type = 'info') {
+        const toastContainer = document.querySelector('.toast-container');
+        
+        const toast = document.createElement('div');
+        toast.classList.add('toast', 'show');
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
+        
+        // 根据类型设置边框颜色
+        if (type === 'success') {
+            toast.style.borderLeft = '4px solid var(--bs-success)';
+        } else if (type === 'error' || type === 'danger') {
+            toast.style.borderLeft = '4px solid var(--bs-danger)';
+        } else if (type === 'warning') {
+            toast.style.borderLeft = '4px solid var(--bs-warning)';
+        } else {
+            toast.style.borderLeft = '4px solid var(--bs-primary)';
+        }
+        
+        // 设置内容
+        toast.innerHTML = `
+            <div class="toast-header">
+                <strong class="me-auto">${title}</strong>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+            <div class="toast-body">${message}</div>
+        `;
+        
+        toastContainer.appendChild(toast);
+        
+        // 自动关闭
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => {
+                toast.remove();
+            }, 300);
+        }, 5000);
+        
+        // 点击关闭按钮
+        toast.querySelector('.btn-close').addEventListener('click', () => {
+            toast.classList.remove('show');
+            setTimeout(() => {
+                toast.remove();
+            }, 300);
+        });
+    }
+
+    // 初始化
+    async function init() {
+        try {
+            const config = await apiCall('config');
+            
+            if (config.repo_url) repoUrlInput.value = config.repo_url;
+            if (config.github_token) githubTokenInput.value = config.github_token;
+            if (config.display_name) displayNameInput.value = config.display_name;
+            if (config.branch) branchInput.value = config.branch;
+            
+            // 新增：填充定时存档设置
+            currentAutoSaveConfig = {
+                enabled: config.autoSaveEnabled || false,
+                interval: config.autoSaveInterval || 30,
+                targetTag: config.autoSaveTargetTag || ''
+            };
+            autoSaveEnabledSwitch.checked = currentAutoSaveConfig.enabled;
+            autoSaveIntervalInput.value = currentAutoSaveConfig.interval;
+            autoSaveTargetTagInput.value = currentAutoSaveConfig.targetTag;
+            // 根据开关状态显示/隐藏选项
+            autoSaveOptionsDiv.style.display = currentAutoSaveConfig.enabled ? 'flex' : 'none';
+
+            isAuthorized = config.is_authorized;
+            
+            updateAuthUI(isAuthorized);
+            
+            if (isAuthorized) {
+                await refreshStatus();
+                await loadSavesList();
+                // 授权成功后启动定时器（如果启用）
+                setupAutoSaveTimer();
+            }
+        } catch (error) {
+            console.error('初始化失败:', error);
+            showToast('错误', `初始化失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 更新授权UI
+    function updateAuthUI(authorized) {
+        if (authorized) {
+            authStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-2"></i>已成功授权`;
+            authStatus.classList.remove('alert-danger');
+            authStatus.classList.add('alert-success');
+            authStatus.style.display = 'block';
+            
+            logoutBtn.style.display = 'inline-block';
+            
+            // 显示创建存档、存档列表和定时存档部分
+            createSaveSection.style.display = 'block';
+            savesSection.style.display = 'block';
+            autoSaveSection.style.display = 'block'; // 显示定时存档区域
+        } else {
+            authStatus.style.display = 'none';
+            logoutBtn.style.display = 'none';
+            
+            // 隐藏创建存档、存档列表和定时存档部分
+            createSaveSection.style.display = 'none';
+            savesSection.style.display = 'none';
+            autoSaveSection.style.display = 'none'; // 隐藏定时存档区域
+
+            // 未授权时停止定时器
+            clearAutoSaveTimer();
+        }
+    }
+
+    // 刷新Git状态
+    async function refreshStatus() {
+        try {
+            const statusResult = await apiCall('status');
+            
+            if (statusResult.success && statusResult.status) {
+                const status = statusResult.status;
+                
+                // 更新Git初始化状态
+                if (status.initialized) {
+                    gitStatus.innerHTML = `<i class="bi bi-check-circle-fill text-success me-2"></i>Git仓库就绪`;
+                } else {
+                    gitStatus.innerHTML = `<i class="bi bi-circle-fill text-secondary me-2"></i>Git仓库未初始化`;
+                }
+                
+                // 更新更改状态
+                if (status.changes && status.changes.length > 0) {
+                    changesCount.textContent = status.changes.length;
+                    changesStatus.style.display = 'inline';
+                } else {
+                    changesStatus.style.display = 'none';
+                }
+                
+                // 更新当前存档状态
+                if (status.currentSave) {
+                    const saveNameMatch = status.currentSave.tag.match(/^save_\d+_(.+)$/);
+                    const saveName = saveNameMatch ? saveNameMatch[1] : status.currentSave.tag;
+                    currentSaveStatus.innerHTML = `当前存档: <strong>${saveName}</strong>`;
+                } else {
+                    currentSaveStatus.textContent = '未加载任何存档';
+                }
+                
+                // 检查临时stash状态
+                if (status.tempStash && status.tempStash.exists) {
+                    stashNotification.style.display = 'block';
+                } else {
+                    stashNotification.style.display = 'none';
+                }
+            }
+        } catch (error) {
+            console.error('刷新状态失败:', error);
+            showToast('错误', `刷新状态失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 加载存档列表
+    async function loadSavesList() {
+        try {
+            showLoading('正在获取存档列表...');
+            
+            const result = await apiCall('saves');
+            
+            if (result.success && result.saves) {
+                currentSaves = result.saves;
+                
+                renderSavesList(currentSaves);
+            } else {
+                throw new Error(result.message || '获取存档列表失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('加载存档列表失败:', error);
+            showToast('错误', `加载存档列表失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 渲染存档列表
+    function renderSavesList(saves) {
+        // 先清空容器
+        while (savesContainer.firstChild) {
+            savesContainer.removeChild(savesContainer.firstChild);
+        }
+        
+        // 检查是否有存档
+        if (saves.length === 0) {
+            savesContainer.appendChild(noSavesMessage);
+            return;
+        }
+        
+        // 获取当前加载的存档
+        let currentLoadedSave = null;
+        
+        apiCall('config').then(config => {
+            if (config.current_save && config.current_save.tag) {
+                currentLoadedSave = config.current_save.tag;
+                
+                // 更新已渲染的存档卡片
+                const currentSaveCard = document.querySelector(`.save-card[data-tag="${currentLoadedSave}"]`);
+                if (currentSaveCard) {
+                    const badge = document.createElement('div');
+                    badge.classList.add('save-current-badge');
+                    badge.textContent = '当前存档';
+                    currentSaveCard.appendChild(badge);
+                }
+            }
+        });
+        
+        // 创建存档卡片
+        saves.forEach(save => {
+            const saveCard = document.createElement('div');
+            saveCard.classList.add('card', 'save-card', 'mb-3');
+            saveCard.dataset.tag = save.tag;
+            
+            const saveDate = new Date(save.timestamp);
+            const formattedDate = saveDate.toLocaleString();
+            
+            // 使用新的时间戳字段
+            const createdAtDate = new Date(save.createdAt);
+            const updatedAtDate = new Date(save.updatedAt);
+            const formattedCreatedAt = createdAtDate.toLocaleString();
+            const formattedUpdatedAt = updatedAtDate.toLocaleString();
+            const descriptionText = save.description || '无描述';
+            const creatorName = save.creator || '未知';
+            
+            saveCard.innerHTML = `
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div style="flex-grow: 1; margin-right: 15px;">
+                            <h5 class="card-title mb-1">${save.name}</h5>
+                            <div class="save-timestamp mb-1">
+                                <small>创建于: ${formattedCreatedAt} | 更新于: ${formattedUpdatedAt}</small>
+                            </div>
+                            <div class="save-creator mb-2">操作人: ${creatorName}</div>
+                            <div class="save-description">${descriptionText}</div>
+                            <!-- 新增：显示并可复制标签名 -->
+                            <div class="save-tag-info mt-2">
+                                <small class="text-muted">标签名: <code class="user-select-all">${save.tag}</code></small>
+                                <button class="btn btn-sm btn-outline-secondary copy-tag-btn ms-1" data-tag="${save.tag}" title="复制标签名">
+                                    <i class="bi bi-clipboard"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="action-buttons flex-shrink-0">
+                            <button class="btn btn-sm btn-primary rename-save-btn" data-tag="${save.tag}" data-name="${save.name}" data-description="${descriptionText}" title="重命名此存档">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button class="btn btn-sm btn-success load-save-btn" data-tag="${save.tag}" title="加载此存档">
+                                <i class="bi bi-cloud-download"></i>
+                            </button>
+                            <button class="btn btn-sm btn-warning overwrite-save-btn" data-tag="${save.tag}" data-name="${save.name}" title="用当前本地数据覆盖此云存档">
+                                <i class="bi bi-upload"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-info diff-save-btn" data-tag="${save.tag}" data-name="${save.name}" title="比较差异">
+                                <i class="bi bi-file-diff"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger delete-save-btn" data-tag="${save.tag}" title="删除此存档">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // 如果是当前加载的存档，添加标记
+            if (save.tag === currentLoadedSave) {
+                const badge = document.createElement('div');
+                badge.classList.add('save-current-badge');
+                badge.textContent = '当前存档';
+                saveCard.appendChild(badge);
+            }
+            
+            savesContainer.appendChild(saveCard);
+        });
+        
+        // 注册按钮事件
+        registerSaveCardEvents();
+    }
+    
+    // 注册存档卡片按钮事件
+    function registerSaveCardEvents() {
+        // 加载存档按钮
+        document.querySelectorAll('.load-save-btn').forEach(btn => {
+            btn.addEventListener('click', async function() {
+                const tagName = this.dataset.tag;
+                showConfirmDialog(
+                    `确认加载存档`,
+                    `您确定要加载此存档吗？所有当前未保存的更改将被暂存。`,
+                    async () => {
+                        await loadSave(tagName);
+                    }
+                );
+            });
+        });
+        
+        // 重命名存档按钮
+        document.querySelectorAll('.rename-save-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                renameTarget = this.dataset.tag;
+                renameTagNameInput.value = renameTarget;
+                renameNewNameInput.value = this.dataset.name || '';
+                renameDescriptionInput.value = this.dataset.description || '';
+                renameModal.show();
+            });
+        });
+        
+        // 覆盖存档按钮
+        document.querySelectorAll('.overwrite-save-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const tagName = this.dataset.tag;
+                const saveName = this.dataset.name || tagName; // 获取存档名用于提示
+                showConfirmDialog(
+                    `确认覆盖存档 "${saveName}"`,
+                    `<strong>警告：此操作不可逆！</strong><br>您确定要用当前本地的 SillyTavern 数据覆盖云端的 "${saveName}" 存档吗？云端该存档之前的内容将会丢失。`,
+                    async () => {
+                        await overwriteSave(tagName);
+                    },
+                    'danger' // 使用危险确认按钮样式
+                );
+            });
+        });
+        
+        // 删除存档按钮
+        document.querySelectorAll('.delete-save-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const tagName = this.dataset.tag;
+                showConfirmDialog(
+                    `确认删除存档`,
+                    `您确定要删除此存档吗？此操作无法撤销。`,
+                    async () => {
+                        await deleteSave(tagName);
+                    }
+                );
+            });
+        });
+        
+        // 比较差异按钮
+        document.querySelectorAll('.diff-save-btn').forEach(btn => {
+            btn.addEventListener('click', async function() {
+                const tagName = this.dataset.tag;
+                // 再次尝试获取存档名称，添加日志调试
+                const saveName = this.dataset.name;
+                console.log('Comparing save:', tagName, 'Name from dataset:', saveName);
+                if (!saveName) {
+                    console.error('Could not retrieve save name from button dataset!');
+                }
+                
+                try {
+                    showLoading('正在加载差异...');
+                    
+                    // --- BEGIN REVERT DIFF LOGIC ---
+                    // 恢复为比较标签和当前 HEAD
+                    const tagRef1 = encodeURIComponent(tagName);
+                    const tagRef2 = 'HEAD'; // 直接使用 HEAD
+                    const result = await apiCall(`saves/diff?tag1=${tagRef1}&tag2=${tagRef2}`);
+                    // --- END REVERT DIFF LOGIC ---
+                    
+                    if (result.success) {
+                        // 更新模态框标题，确保 saveName 有值
+                        const diffModalLabel = document.getElementById('diffModalLabel');
+                        diffModalLabel.textContent = `存档 "${saveName || tagName}" 与当前状态的差异`; // 使用 tagname 作为备用
+                        
+                        // 隐藏统计信息区域 (保持不变)
+                        diffSummary.innerHTML = ''; 
+                        diffSummary.style.display = 'none'; 
+                        
+                        diffFiles.innerHTML = '';
+                        if (result.changedFiles && result.changedFiles.length > 0) {
+                           const fileList = document.createElement('ul');
+                            fileList.classList.add('list-unstyled'); 
+                            result.changedFiles.forEach(file => {
+                                const li = document.createElement('li');
+                                li.classList.add('mb-1');
+                                let statusText = '';
+                                let statusClass = '';
+                                let statusIcon = ''; 
+                                switch (file.status.charAt(0)) {
+                                    case 'A': statusText = '添加'; statusClass = 'text-success'; statusIcon = '<i class="bi bi-plus-circle-fill me-2"></i>'; break;
+                                    case 'M': statusText = '修改'; statusClass = 'text-warning'; statusIcon = '<i class="bi bi-pencil-fill me-2"></i>'; break;
+                                    case 'D': statusText = '删除'; statusClass = 'text-danger'; statusIcon = '<i class="bi bi-trash-fill me-2"></i>'; break;
+                                    case 'R': statusText = '重命名'; statusClass = 'text-info'; statusIcon = '<i class="bi bi-arrow-left-right me-2"></i>'; break;
+                                    case 'C': statusText = '复制'; statusClass = 'text-info'; statusIcon = '<i class="bi bi-files me-2"></i>'; break;
+                                    default: statusText = file.status; statusClass = 'text-secondary'; statusIcon = '<i class="bi bi-question-circle-fill me-2"></i>';
+                                }
+                                li.innerHTML = `<span class="${statusClass}" style="display: inline-block; width: 60px;">${statusIcon}${statusText}</span><code>${file.fileName}</code>`;
+                                fileList.appendChild(li);
+                            });
+                            diffFiles.appendChild(fileList);
+                        } else {
+                            diffFiles.innerHTML = '<p class="text-center text-secondary mt-3">此存档与当前状态没有文件差异。</p>'; // 更新无差异消息
+                        }
+                        
+                        hideLoading();
+                        diffModal.show();
+                    } else {
+                        throw new Error(result.message || '获取差异失败');
+                    }
+                } catch (error) {
+                    hideLoading();
+                    console.error('获取差异失败:', error);
+                    showToast('错误', `获取差异失败: ${error.message}`, 'error');
                 }
             });
-        } catch (e) {
-             console.error('创建或显示 Bootstrap Toast 时出错:', e);
-             if (toastElement.parentNode) {
-                toastElement.parentNode.removeChild(toastElement);
-             }
-        }
-    } else {
-         console.error('无法找到 toast 元素或 Bootstrap Toast 组件。Toast 消息可能无法显示。');
-         // Attempt to remove manually after a delay as a fallback
-         if (toastElement && toastElement.parentNode) {
-             setTimeout(() => {
-                if (toastElement.parentNode) toastElement.parentNode.removeChild(toastElement);
-             }, 5500); // Slightly longer than delay
-         }
-    }
-}
-
-// 显示确认对话框
-function showConfirmDialog(options) {
-    return new Promise((resolve, reject) => {
-        const dialogElement = document.getElementById('confirmDialog');
-        if (!(dialogElement instanceof HTMLElement)) {
-            console.error('确认对话框元素未找到');
-            // 回退到原生 confirm
-            if (window.confirm(options.message)) {
-                resolve(true);
-            } else {
-                resolve(false);
-            }
-            return;
-        }
-
-        // 设置对话框内容
-        const titleElement = document.getElementById('confirmDialogLabel');
-        const messageElement = document.getElementById('confirm-dialog-message');
-        const confirmButton = document.getElementById('confirm-dialog-confirm-btn');
-        const cancelButton = document.getElementById('confirm-dialog-cancel-btn');
-        const iconElement = document.getElementById('confirm-dialog-icon');
-
-        // 防止元素不存在导致错误
-        if (titleElement instanceof HTMLElement) {
-            titleElement.textContent = options.title || '确认操作';
-        }
-        if (messageElement instanceof HTMLElement) {
-            messageElement.textContent = options.message || '';
-        }
-        if (confirmButton instanceof HTMLElement) {
-            confirmButton.textContent = options.confirmText || '确认';
-            confirmButton.className = 'btn ' + (options.confirmButtonClass || 'btn-primary');
-        }
-        if (cancelButton instanceof HTMLElement) {
-            cancelButton.textContent = options.cancelText || '取消';
-            cancelButton.className = 'btn ' + (options.cancelButtonClass || 'btn-secondary');
-        }
-        if (iconElement instanceof HTMLElement) {
-            let iconClass = 'bi bi-question-circle-fill text-primary';
-            if (options.type === 'warning') {
-                iconClass = 'bi bi-exclamation-triangle-fill text-warning';
-            } else if (options.type === 'danger') {
-                iconClass = 'bi bi-exclamation-circle-fill text-danger';
-            } else if (options.type === 'info') {
-                iconClass = 'bi bi-info-circle-fill text-info';
-            } else if (options.type === 'success') {
-                iconClass = 'bi bi-check-circle-fill text-success';
-            }
-            iconElement.innerHTML = `<i class="${iconClass}" style="font-size: 2.5rem;"></i>`;
-        }
-
-        // 创建并显示模态框
-        let dialog = null;
-        if (typeof window.bootstrap !== 'undefined' && typeof window.bootstrap.Modal === 'function') {
-            dialog = new window.bootstrap.Modal(dialogElement);
-            dialog.show();
-        } else {
-            console.error('Bootstrap Modal 组件未找到');
-            // 回退到原生 confirm
-            if (window.confirm(options.message)) {
-                resolve(true);
-            } else {
-                resolve(false);
-            }
-            return;
-        }
-
-        // 处理按钮点击事件
-        const confirmHandler = () => {
-            dialog.hide();
-            cleanupEventListeners();
-            resolve(true);
-        };
-
-        const cancelHandler = () => {
-            dialog.hide();
-            cleanupEventListeners();
-            resolve(false);
-        };
-
-        // 处理模态框隐藏事件
-        const hiddenHandler = () => {
-            cleanupEventListeners();
-            resolve(false);
-        };
-
-        // 清理事件监听器
-        const cleanupEventListeners = () => {
-            if (confirmButton instanceof HTMLElement) {
-                confirmButton.removeEventListener('click', confirmHandler);
-            }
-            if (cancelButton instanceof HTMLElement) {
-                cancelButton.removeEventListener('click', cancelHandler);
-            }
-            dialogElement.removeEventListener('hidden.bs.modal', hiddenHandler);
-        };
-
-        // 添加事件监听器
-        if (confirmButton instanceof HTMLElement) {
-            confirmButton.addEventListener('click', confirmHandler);
-        }
-        if (cancelButton instanceof HTMLElement) {
-            cancelButton.addEventListener('click', cancelHandler);
-        }
-        dialogElement.addEventListener('hidden.bs.modal', hiddenHandler);
-    });
-}
-
-// 撤销上次同步操作
-async function undoLastSync() {
-    try {
-        // 显示确认对话框
-        const confirmed = await showConfirmDialog({
-            title: '撤销同步',
-            message: '您确定要撤销上次同步操作吗？这将恢复到同步前的状态。',
-            confirmText: '确认撤销',
-            cancelText: '取消',
-            type: 'warning',
-            confirmButtonClass: 'btn-danger'
         });
-        
-        if (!confirmed) {
-            return;
-        }
-        
-        // 显示加载状态
-        showSpinner('undo_sync_btn', true);
-        const undoContainer = document.getElementById('undo_sync_container');
-        if (undoContainer) {
-            undoContainer.querySelector('small').textContent = '正在撤销...';
-        }
-        
-        // 执行撤销
-        const result = await apiRequest('/undo-sync', 'POST');
-        
-        if (result && result.success) {
-            const operationText = result.operation === 'push' ? '推送' : '拉取';
-            showToast('成功', `成功撤销了上次${operationText}操作`, 'success');
-            
-            // 更新状态
-            updateUndoButton(null, false);
-            await checkGitStatus();
-        } else {
-            // 处理 stash apply 失败的特殊情况
-            if (result && result.error === 'stash_apply_failed') {
-                 showToast('警告', '撤销成功，但恢复本地更改时可能发生冲突。请检查您的文件状态，或使用git stash list查看并手动恢复。', 'warning');
-                 updateUndoButton(null, false); // 撤销操作本身算完成
-                 await checkGitStatus();
-            } else {
-                showToast('错误', result.message || '撤销操作失败', 'danger');
-                // 撤销失败时，可能需要重新检查撤销可用性
-                await checkUndoAvailability();
-            }
-        }
-    } catch (error) {
-        console.error('撤销同步失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `撤销同步失败: ${message}`, 'danger');
-        // 撤销失败时，可能需要重新检查撤销可用性
-        await checkUndoAvailability();
-    } finally {
-        showSpinner('undo_sync_btn', false);
-    }
-}
 
-// 检查是否有可撤销的操作
-async function checkUndoAvailability() {
-    try {
-        const result = await apiRequest('/undo-availability', 'GET');
-        
-        if (result && result.available) {
-            updateUndoButton(result.operation, true, result.timestamp);
-        } else {
-            updateUndoButton(null, false);
-        }
-    } catch (error) {
-        console.error('检查撤销可用性失败:', error);
-        // 失败时不显示撤销按钮
-        updateUndoButton(null, false);
+        // --- 新增：复制标签名按钮事件 ---
+        document.querySelectorAll('.copy-tag-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const tagName = this.dataset.tag;
+                navigator.clipboard.writeText(tagName).then(() => {
+                    // 短暂改变图标提示成功
+                    const icon = this.querySelector('i');
+                    const originalIconClass = icon.className;
+                    icon.className = 'bi bi-check-lg text-success'; 
+                    showToast('提示', '标签名已复制到剪贴板', 'info');
+                    setTimeout(() => {
+                        icon.className = originalIconClass;
+                    }, 1500); // 1.5秒后恢复图标
+                }).catch(err => {
+                    console.error('复制标签名失败:', err);
+                    showToast('错误', '复制标签名失败', 'error');
+                });
+            });
+        });
     }
-}
 
-// 更新撤销按钮状态
-function updateUndoButton(operation, available, timestamp) {
-    const container = document.getElementById('undo_sync_container');
-    const infoText = document.getElementById('undo_sync_info');
-    
-    if (!container || !infoText) {
-        console.warn('撤销按钮容器或信息文本未找到');
-        return;
-    }
-    
-    if (!available) {
-        container.style.display = 'none';
-        return;
-    }
-    
-    container.style.display = 'block';
-    
-    let operationText = '';
-    if (operation === 'push') {
-        operationText = '推送到远程';
-    } else if (operation === 'pull') {
-        operationText = '从远程拉取';
-    } else if (operation === 'force-push') {
-        operationText = '强制推送';
-    } else if (operation === 'force-pull') {
-        operationText = '强制拉取';
-    } else {
-        operationText = '同步';
-    }
-    
-    let timeText = '';
-    if (timestamp) {
+    // 加载存档
+    async function loadSave(tagName) {
         try {
-            const syncTime = new Date(timestamp);
-            timeText = syncTime.toLocaleString();
-        } catch (e) {
-            timeText = timestamp;
+            showLoading('正在加载存档...');
+            
+            const result = await apiCall('saves/load', 'POST', { tagName });
+            
+            if (result.success) {
+                showToast('成功', '存档加载成功', 'success');
+                await refreshStatus();
+                // 高亮显示逻辑不需要改变
+                highlightCurrentSave(tagName);
+            } else {
+                throw new Error(result.message || '加载存档失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('加载存档失败:', error);
+            showToast('错误', `加载存档失败: ${error.message}`, 'error');
+        }
+    }
+
+    // --- 新增：高亮当前存档的辅助函数 ---
+    function highlightCurrentSave(tagName) {
+        document.querySelectorAll('.save-current-badge').forEach(badge => badge.remove());
+        const saveCard = document.querySelector(`.save-card[data-tag="${tagName}"]`);
+        if (saveCard) {
+            const badge = document.createElement('div');
+            badge.classList.add('save-current-badge');
+            badge.textContent = '当前存档';
+            saveCard.appendChild(badge);
+        }
+    }
+
+    // 删除存档
+    async function deleteSave(tagName) {
+        try {
+            showLoading('正在删除存档...');
+            
+            const result = await apiCall(`saves/${tagName}`, 'DELETE');
+            
+            if (result.success) {
+                // 如果删除成功但有警告
+                if (result.warning) {
+                    showToast('警告', result.message, 'warning');
+                } else {
+                    showToast('成功', '存档已删除', 'success');
+                }
+                
+                // 从列表移除
+                currentSaves = currentSaves.filter(save => save.tag !== tagName);
+                renderSavesList(currentSaves);
+                
+                // 刷新状态
+                await refreshStatus();
+            } else {
+                throw new Error(result.message || '删除存档失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('删除存档失败:', error);
+            showToast('错误', `删除存档失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 创建存档
+    async function createSave(name, description) {
+        try {
+            if (!name || name.trim() === '') {
+                showToast('错误', '存档名称不能为空', 'error');
+                return;
+            }
+            
+            showLoading('正在创建存档...');
+            
+            const result = await apiCall('saves', 'POST', {
+                name: name,
+                description: description
+            });
+            
+            if (result.success) {
+                showToast('成功', '存档创建成功', 'success');
+                
+                // 清空输入
+                saveNameInput.value = '';
+                saveDescriptionInput.value = '';
+                
+                // 刷新列表
+                await loadSavesList();
+                await refreshStatus();
+            } else {
+                throw new Error(result.message || '创建存档失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('创建存档失败:', error);
+            showToast('错误', `创建存档失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 重命名存档
+    async function renameSave(oldTagName, newName, description) {
+        try {
+            if (!newName || newName.trim() === '') {
+                showToast('错误', '存档名称不能为空', 'error');
+                return;
+            }
+            
+            showLoading('正在重命名存档...');
+            
+            const result = await apiCall(`saves/${oldTagName}`, 'PUT', {
+                newName: newName,
+                description: description
+            });
+            
+            if (result.success) {
+                showToast('成功', '存档重命名成功', 'success');
+                
+                // 刷新列表
+                await loadSavesList();
+            } else {
+                throw new Error(result.message || '重命名存档失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('重命名存档失败:', error);
+            showToast('错误', `重命名存档失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 授权后端仓库
+    async function authorize(repoUrl, token, displayName, branch) {
+        try {
+            if (!repoUrl || !token) {
+                showToast('错误', '仓库URL和访问令牌不能为空', 'error');
+                return;
+            }
+            
+            showLoading('正在授权并连接仓库...');
+            
+            const result = await apiCall('authorize', 'POST', {
+                branch: branch
+            });
+            
+            if (result.success) {
+                isAuthorized = true;
+                updateAuthUI(true);
+                
+                // 刷新状态
+                await refreshStatus();
+                // 获取存档列表
+                await loadSavesList();
+                
+                showToast('成功', '仓库授权成功！', 'success');
+            } else {
+                throw new Error(result.message || '授权失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('授权失败:', error);
+            
+            authStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-2"></i>授权失败: ${error.message}`;
+            authStatus.classList.remove('alert-success');
+            authStatus.classList.add('alert-danger');
+            authStatus.style.display = 'block';
+            
+            showToast('错误', `授权失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 登出/断开连接
+    async function logout() {
+        try {
+            showLoading('正在断开连接...');
+            
+            await apiCall('config', 'POST', {
+                repo_url: repoUrlInput.value, 
+                github_token: '', 
+                display_name: displayNameInput.value,
+                branch: 'main',
+                is_authorized: false
+            });
+            
+            isAuthorized = false;
+            updateAuthUI(false);
+            githubTokenInput.value = '';
+            branchInput.value = 'main';
+            
+            hideLoading();
+            showToast('成功', '已断开与仓库的连接', 'success');
+        } catch (error) {
+            hideLoading();
+            console.error('断开连接失败:', error);
+            showToast('错误', `断开连接失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 应用临时stash
+    async function applyStash() {
+        try {
+            showLoading('正在恢复临时更改...');
+            
+            const result = await apiCall('stash/apply', 'POST');
+            
+            if (result.success) {
+                stashNotification.style.display = 'none';
+                showToast('成功', '临时更改已恢复', 'success');
+                
+                // 刷新状态
+                await refreshStatus();
+            } else {
+                throw new Error(result.message || '恢复临时更改失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('恢复临时更改失败:', error);
+            showToast('错误', `恢复临时更改失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 丢弃临时stash
+    async function discardStash() {
+        try {
+            showLoading('正在丢弃临时更改...');
+            
+            const result = await apiCall('stash/discard', 'POST');
+            
+            if (result.success) {
+                stashNotification.style.display = 'none';
+                showToast('成功', '临时更改已丢弃', 'success');
+                
+                // 刷新状态
+                await refreshStatus();
+            } else {
+                throw new Error(result.message || '丢弃临时更改失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('丢弃临时更改失败:', error);
+            showToast('错误', `丢弃临时更改失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 覆盖存档
+    async function overwriteSave(tagName) {
+        try {
+            showLoading('正在覆盖存档...');
+            
+            const result = await apiCall(`saves/${tagName}/overwrite`, 'POST');
+            
+            if (result.success) {
+                showToast('成功', '存档已成功覆盖', 'success');
+                // 覆盖后通常需要刷新列表，因为时间戳等信息可能更新 (取决于后端实现)
+                await loadSavesList(); 
+                await refreshStatus();
+            } else {
+                throw new Error(result.message || '覆盖存档失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('覆盖存档失败:', error);
+            showToast('错误', `覆盖存档失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 过滤和排序存档列表
+    function filterAndSortSaves() {
+        if (!currentSaves || currentSaves.length === 0) return;
+        
+        const searchTerm = searchBox.value.toLowerCase();
+        const sortMethod = sortSelector.value;
+        
+        // 筛选
+        let filteredSaves = currentSaves;
+        if (searchTerm) {
+            filteredSaves = currentSaves.filter(save => 
+                save.name.toLowerCase().includes(searchTerm) || 
+                (save.description && save.description.toLowerCase().includes(searchTerm))
+            );
+        }
+        
+        // 排序
+        filteredSaves.sort((a, b) => {
+            switch (sortMethod) {
+                case 'updated-desc': // 使用新的值
+                    return new Date(b.updatedAt) - new Date(a.updatedAt);
+                case 'updated-asc': // 使用新的值
+                    return new Date(a.updatedAt) - new Date(b.updatedAt);
+                case 'name-asc':
+                    return a.name.localeCompare(b.name);
+                case 'name-desc':
+                    return b.name.localeCompare(a.name);
+                default:
+                    return 0;
+            }
+        });
+        
+        renderSavesList(filteredSaves);
+    }
+
+    // 保存配置函数
+    async function saveConfiguration() {
+        const repoUrl = repoUrlInput.value.trim();
+        const token = githubTokenInput.value.trim();
+        const displayName = displayNameInput.value.trim();
+        const branch = branchInput.value.trim() || 'main';
+
+        if (!repoUrl) {
+            showToast('提示', '仓库URL不能为空', 'warning');
+            // return false; // 允许只保存部分配置
+        }
+
+        try {
+            showLoading('正在保存配置...');
+            const result = await apiCall('config', 'POST', {
+                repo_url: repoUrl,
+                github_token: token,
+                display_name: displayName,
+                branch: branch
+            });
+
+            if (result.success) {
+                showToast('成功', '配置已保存', 'success');
+                branchInput.value = branch;
+                hideLoading();
+                return true;
+            } else {
+                throw new Error(result.message || '保存配置失败');
+            }
+        } catch (error) {
+            hideLoading();
+            console.error('保存配置失败:', error);
+            showToast('错误', `保存配置失败: ${error.message}`, 'error');
+            return false;
+        }
+    }
+
+    // --- 新增：保存定时存档设置函数 ---
+    async function saveAutoSaveConfiguration() {
+        const enabled = autoSaveEnabledSwitch.checked;
+        const interval = parseInt(autoSaveIntervalInput.value, 10) || 30;
+        const targetTag = autoSaveTargetTagInput.value.trim();
+
+        if (enabled && !targetTag) {
+            showToast('警告', '启用定时存档时，必须指定一个要覆盖的目标存档标签。', 'warning');
+            return false;
+        }
+
+        currentAutoSaveConfig = { enabled, interval, targetTag };
+
+        try {
+            showLoading('正在保存定时存档设置...');
+            const result = await apiCall('config', 'POST', {
+                repo_url: repoUrlInput.value.trim(),
+                github_token: githubTokenInput.value.trim(),
+                display_name: displayNameInput.value.trim(),
+                branch: branchInput.value.trim() || 'main',
+                autoSaveEnabled: enabled,
+                autoSaveInterval: interval,
+                autoSaveTargetTag: targetTag
+            });
+
+            if (result.success) {
+                showToast('成功', '定时存档设置已保存', 'success');
+                hideLoading();
+                setupAutoSaveTimer(); 
+                return true;
+            } else {
+                throw new Error(result.message || '保存定时设置失败');
+            }
+        } catch (error) {
+            hideLoading();
+            console.error('保存定时设置失败:', error);
+            showToast('错误', `保存定时设置失败: ${error.message}`, 'error');
+            return false;
+        }
+    }
+
+    // --- 新增：设置/清除定时存档的定时器 ---
+    function setupAutoSaveTimer() {
+        clearAutoSaveTimer(); 
+        if (currentAutoSaveConfig.enabled && isAuthorized && currentAutoSaveConfig.targetTag) {
+            const intervalMilliseconds = currentAutoSaveConfig.interval * 60 * 1000;
+            if (intervalMilliseconds > 0) {
+                console.log(`[Cloud Saves] 启动定时存档，间隔 ${currentAutoSaveConfig.interval} 分钟，目标: ${currentAutoSaveConfig.targetTag}`);
+                autoSaveTimer = setInterval(async () => {
+                    console.log('[Cloud Saves] 定时器触发，执行自动覆盖存档...');
+                    showToast('信息', `正在自动存档到 ${currentAutoSaveConfig.targetTag}...`, 'info');
+                    try {
+                        await overwriteSave(currentAutoSaveConfig.targetTag);
+                        showToast('成功', `已自动存档到 ${currentAutoSaveConfig.targetTag}`, 'success');
+                    } catch (error) {
+                        console.error('[Cloud Saves] 自动存档失败:', error);
+                        showToast('错误', `自动存档到 ${currentAutoSaveConfig.targetTag} 失败: ${error.message}`, 'error');
+                    }
+                }, intervalMilliseconds);
+            } else {
+                console.warn('[Cloud Saves] 无效的定时存档间隔，定时器未启动。');
+            }
+        } else {
+            console.log('[Cloud Saves] 定时存档未启用、未授权或未指定目标标签，定时器未启动。');
+        }
+    }
+
+    // --- 新增：清除定时器函数 ---
+    function clearAutoSaveTimer() {
+        if (autoSaveTimer) {
+            console.log('[Cloud Saves] 清除定时存档定时器。');
+            clearInterval(autoSaveTimer);
+            autoSaveTimer = null;
         }
     }
     
-    infoText.textContent = `可撤销最近一次${operationText}操作${timeText ? ` (${timeText})` : ''}`;
-}
-
-// 新增：强制推送到远程
-async function forcePush() {
-    try {
-        const confirmed = await showConfirmDialog({
-            title: '确认强制推送',
-            message: '警告：此操作将强制用您的本地数据覆盖远程仓库！远程仓库中任何本地没有的更改都将丢失。此操作通常用于解决合并冲突，请谨慎使用。您确定要继续吗？',
-            confirmText: '确认强制推送',
-            cancelText: '取消',
-            type: 'danger',
-            confirmButtonClass: 'btn-danger'
-        });
-
-        if (!confirmed) {
-            showToast('信息', '强制推送已取消', 'info');
-            return;
-        }
-
-        showSpinner('force_push_btn', true);
-        const response = await apiRequest('/git/sync/force-overwrite-remote', 'POST');
-        showToast('成功', '强制推送成功，远程仓库已更新为本地状态', 'success');
-
-        if (response && response.undoAvailable) {
-            updateUndoButton('force-push', true); // Pass a distinct operation type
-        }
-
-        await Promise.all([
-            checkGitStatus(),
-            loadConfig()
-        ]);
-
-    } catch (error) {
-        console.error('强制推送失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `强制推送失败: ${message}`, 'danger');
-    } finally {
-        showSpinner('force_push_btn', false);
+    // 显示确认对话框 ... (保持不变) ...
+    function showConfirmDialog(title, message, callback, confirmButtonType = 'danger') { 
+        // ... (代码保持不变) ...
+        confirmModal.show();
     }
-}
 
-// 新增：强制从远程拉取（覆盖本地）
-async function forcePull() {
-    try {
-        const confirmed = await showConfirmDialog({
-            title: '确认强制拉取',
-            message: '警告：此操作将强制用远程仓库的数据覆盖您的本地数据！所有本地未推送的更改和未追踪的文件都将丢失。此操作通常用于解决合并冲突或同步初始化，请谨慎使用。您确定要继续吗？',
-            confirmText: '确认强制拉取',
-            cancelText: '取消',
-            type: 'danger', // Use danger for potentially destructive action
-            confirmButtonClass: 'btn-danger'
-        });
-
-        if (!confirmed) {
-            showToast('信息', '强制拉取已取消', 'info');
-            return;
+    // 绑定事件
+    // --- 使用辅助函数安全地添加监听器 ---
+    function safeAddEventListener(element, event, handler, elementIdForLogging) {
+        if (element) {
+            element.addEventListener(event, handler);
+        } else {
+            console.error(`[Cloud Saves UI] Element not found for ID: ${elementIdForLogging}. Cannot add event listener.`);
         }
-
-        showSpinner('force_pull_btn', true);
-        const response = await apiRequest('/git/sync/force-overwrite-local', 'POST');
-        showToast('成功', '强制拉取成功，本地数据已更新为远程状态', 'success');
-
-         if (response && response.undoAvailable) {
-            updateUndoButton('force-pull', true); // Pass a distinct operation type
-        }
-
-        await Promise.all([
-            checkGitStatus(),
-            loadConfig()
-        ]);
-
-    } catch (error) {
-        console.error('强制拉取失败:', error);
-        const message = error instanceof Error ? error.message : String(error);
-        showToast('错误', `强制拉取失败: ${message}`, 'danger');
-    } finally {
-        showSpinner('force_pull_btn', false);
     }
-} 
+
+    // --- 事件监听器绑定 --- (放在函数定义之后)
+    safeAddEventListener(configureBtn, 'click', saveConfiguration, 'configure-btn');
+    safeAddEventListener(authorizeBtn, 'click', async () => {
+        const configSaved = await saveConfiguration();
+        if (configSaved) {
+            const repoUrl = repoUrlInput.value.trim();
+            const token = githubTokenInput.value.trim();
+            const displayName = displayNameInput.value.trim();
+            const branch = branchInput.value.trim() || 'main';
+            if (repoUrl && token) {
+                await authorize(repoUrl, token, displayName, branch);
+            } else {
+                showToast('提示', '仓库URL和访问令牌是授权所必需的', 'warning');
+            }
+        }
+    }, 'authorize-btn');
+    safeAddEventListener(logoutBtn, 'click', () => {
+        showConfirmDialog('确认断开连接', '您确定要断开与仓库的连接吗？这将不会删除任何数据。', logout, 'primary');
+    }, 'logout-btn');
+    safeAddEventListener(createSaveBtn, 'click', () => {
+        createSave(saveNameInput.value, saveDescriptionInput.value);
+    }, 'create-save-btn');
+    safeAddEventListener(confirmRenameBtn, 'click', () => {
+        renameSave(renameTagNameInput.value, renameNewNameInput.value, renameDescriptionInput.value);
+        renameModal.hide();
+    }, 'confirm-rename-btn');
+    safeAddEventListener(confirmActionBtn, 'click', () => {
+        if (typeof confirmCallback === 'function') {
+            confirmCallback();
+        }
+        confirmModal.hide();
+    }, 'confirm-action-btn');
+    safeAddEventListener(refreshSavesBtn, 'click', loadSavesList, 'refresh-saves-btn');
+    safeAddEventListener(searchBox, 'input', filterAndSortSaves, 'search-box');
+    safeAddEventListener(sortSelector, 'change', filterAndSortSaves, 'sort-selector');
+    safeAddEventListener(applyStashBtn, 'click', applyStash, 'apply-stash-btn');
+    safeAddEventListener(discardStashBtn, 'click', () => {
+        showConfirmDialog('确认丢弃临时更改', '您确定要丢弃所有临时保存的更改吗？此操作无法撤销。', discardStash, 'danger');
+    }, 'discard-stash-btn');
+    safeAddEventListener(autoSaveEnabledSwitch, 'change', () => {
+        autoSaveOptionsDiv.style.display = autoSaveEnabledSwitch.checked ? 'flex' : 'none';
+    }, 'auto-save-enabled');
+    safeAddEventListener(saveAutoSaveSettingsBtn, 'click', saveAutoSaveConfiguration, 'save-auto-save-settings-btn');
+
+    // 初始化
+    init();
+
+}); // DOMContentLoaded 结束 
