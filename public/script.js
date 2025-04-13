@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const configureBtn = document.getElementById('configure-btn');
     const authorizeBtn = document.getElementById('authorize-btn');
     const logoutBtn = document.getElementById('logout-btn');
+    const initRepoBtn = document.getElementById('init-repo-btn'); // 新增
 
     const createSaveSection = document.getElementById('create-save-section');
     const saveNameInput = document.getElementById('save-name');
@@ -999,8 +1000,40 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 显示确认对话框 ... (保持不变) ...
     function showConfirmDialog(title, message, callback, confirmButtonType = 'danger') { 
-        // ... (代码保持不变) ...
-        confirmModal.show();
+        const titleElement = document.getElementById('confirmModalLabel');
+        const messageElement = document.getElementById('confirm-message'); // 直接获取元素
+
+        if (titleElement) {
+             titleElement.textContent = title;
+        } else {
+            console.error('[Cloud Saves UI] Confirm dialog title element (confirmModalLabel) not found!');
+        }
+
+        if (messageElement) {
+            messageElement.innerHTML = message; // 设置消息
+        } else {
+            console.error('[Cloud Saves UI] Confirm dialog message element (confirm-message) not found!');
+        }
+        
+        confirmCallback = callback;
+        
+        // 确认按钮样式设置 (假设 confirmActionBtn 能正确获取)
+        confirmActionBtn.classList.remove('btn-danger', 'btn-primary', 'btn-success', 'btn-warning', 'btn-secondary'); 
+        if (confirmButtonType === 'danger') {
+            confirmActionBtn.classList.add('btn-danger');
+        } else if (confirmButtonType === 'primary') {
+            confirmActionBtn.classList.add('btn-primary');
+        } else {
+            confirmActionBtn.classList.add('btn-secondary'); 
+        }
+        
+        // 确保 confirmModal 实例存在
+        if (confirmModal && typeof confirmModal.show === 'function') {
+             confirmModal.show();
+        } else {
+             console.error('[Cloud Saves UI] Confirm dialog modal instance (confirmModal) is invalid or missing!');
+             showToast('错误', '无法显示确认对话框', 'error'); // 给用户一个反馈
+        }
     }
 
     // 绑定事件
@@ -1014,6 +1047,14 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- 事件监听器绑定 --- (放在函数定义之后)
+    safeAddEventListener(initRepoBtn, 'click', () => {
+        showConfirmDialog(
+            '确认强制初始化仓库',
+            '<strong>警告：此操作将删除 data 目录下的现有 Git 历史 (如果存在)！</strong><br>确定要强制初始化本地 Git 仓库并配置远程地址吗？',
+            initializeRepository,
+            'danger' // 危险操作用红色按钮
+        );
+    }, 'init-repo-btn');
     safeAddEventListener(configureBtn, 'click', saveConfiguration, 'configure-btn');
     safeAddEventListener(authorizeBtn, 'click', async () => {
         const configSaved = await saveConfiguration();
@@ -1056,6 +1097,33 @@ document.addEventListener('DOMContentLoaded', function() {
         autoSaveOptionsDiv.style.display = autoSaveEnabledSwitch.checked ? 'flex' : 'none';
     }, 'auto-save-enabled');
     safeAddEventListener(saveAutoSaveSettingsBtn, 'click', saveAutoSaveConfiguration, 'save-auto-save-settings-btn');
+
+    // --- 新增：初始化仓库函数 ---
+    async function initializeRepository() {
+        try {
+            showLoading('正在初始化仓库...');
+            const result = await apiCall('initialize', 'POST');
+            
+            if (result.success) {
+                let message = result.message || '仓库初始化成功';
+                if (result.warning) {
+                    showToast('警告', message, 'warning');
+                } else {
+                    showToast('成功', message, 'success');
+                }
+                // 初始化后刷新状态
+                await refreshStatus(); 
+            } else {
+                throw new Error(result.message || '初始化仓库失败');
+            }
+            
+            hideLoading();
+        } catch (error) {
+            hideLoading();
+            console.error('初始化仓库失败:', error);
+            showToast('错误', `初始化仓库失败: ${error.message}`, 'error');
+        }
+    }
 
     // 初始化
     init();

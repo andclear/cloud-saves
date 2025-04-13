@@ -1378,45 +1378,61 @@ async function init(router) {
             }
         });
 
-        // --- 初始化逻辑 --- (检查配置，连接远程等)
-        const config = await readConfig();
-        console.log('[cloud-saves] 配置加载成功:', {
-            ...config, // 展开现有配置
-            github_token: config.github_token ? '******' : '' // 隐藏日志中的token
-        });
-        await initGitRepo();
-        if (config.repo_url && config.is_authorized) {
-            console.log('[cloud-saves] 检测到已授权的仓库，尝试连接...');
-            const remoteResult = await runGitCommand('git remote -v');
-            if (!remoteResult.success || !remoteResult.stdout.includes('origin')) {
-                console.warn('[cloud-saves] 未配置远程仓库或无法获取，尝试重新配置');
-                await configureRemote(config.repo_url);
+        // --- 新增：强制初始化仓库接口 ---
+        router.post('/initialize', async (req, res) => {
+            if (currentOperation) {
+                return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
             }
-            // 修改：初始化时也进行更精确的 fetch
-            console.log("[cloud-saves] 初始化：获取远程标签...");
-            const initFetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags');
-            if (!initFetchTagsResult.success) {
-                console.error('[cloud-saves] 初始化时无法获取远程标签，可能需要重新授权。');
-                config.is_authorized = false;
-                await saveConfig(config);
-            } else {
-                console.log('[cloud-saves] 初始化：获取标签成功。');
-                // 尝试获取并切换到配置的分支
-                const branch = config.branch || DEFAULT_BRANCH;
-                console.log(`[cloud-saves] 初始化：获取远程分支 ${branch}...`);
-                const initFetchBranchResult = await runGitCommand(`git fetch origin ${branch}`);
-                if (!initFetchBranchResult.success) {
-                     // 如果获取特定分支失败（例如分支被删除），记录警告但可能不直接标记为未授权
-                     console.warn(`[cloud-saves] 初始化时无法获取远程分支 ${branch}: ${initFetchBranchResult.stderr}. 插件可能仍可工作，但建议检查分支设置。`);
-                 } else {
-                     console.log(`[cloud-saves] 初始化：获取分支 ${branch} 成功。尝试切换...`);
-                    const checkoutResult = await runGitCommand(`git checkout ${branch}`);
-                    if (!checkoutResult.success) {
-                        console.warn(`[cloud-saves] 初始化时切换到分支 ${branch} 失败: ${checkoutResult.stderr}. 可能需要先授权一次来创建或同步分支。`);
+            currentOperation = 'initialize_repo';
+            try {
+                console.log('[cloud-saves] 收到强制初始化仓库请求...');
+                const config = await readConfig();
+
+                // 强制删除可能的旧 .git 目录以确保全新初始化
+                // **警告**: 这会删除 data 目录下的 Git 历史！
+                const gitDirPath = path.join(DATA_DIR, '.git');
+                try {
+                    await fs.rm(gitDirPath, { recursive: true, force: true });
+                    console.log(`[cloud-saves] 已强制删除旧的 ${gitDirPath} 目录`);
+                } catch (rmError) {
+                    // 如果删除失败（例如权限问题），记录错误但可能继续尝试 init
+                    console.error(`[cloud-saves] 删除旧的 ${gitDirPath} 目录失败:`, rmError);
+                }
+
+                // 1. 执行 git init
+                const initResult = await initGitRepo(); // 这个函数内部会处理已存在的情况，但我们上面强制删除了
+                if (!initResult.success) {
+                    return res.status(500).json({ success: false, message: `初始化Git仓库失败: ${initResult.message}`, details: initResult });
+                }
+                console.log('[cloud-saves] git init 成功');
+
+                // 2. 配置远程仓库 (如果 URL 已配置)
+                if (config.repo_url) {
+                    console.log(`[cloud-saves] 配置远程仓库: ${config.repo_url}`);
+                    const remoteResult = await configureRemote(config.repo_url);
+                    if (!remoteResult.success) {
+                        // 初始化成功，但配置远程失败，返回警告信息
+                        return res.json({ 
+                            success: true, 
+                            message: '仓库初始化成功，但配置远程仓库失败，请检查仓库 URL。', 
+                            warning: true, 
+                            details: remoteResult 
+                        });
                     }
-                 }
+                    console.log('[cloud-saves] 配置远程仓库成功');
+                } else {
+                    console.log('[cloud-saves] 未配置仓库 URL，跳过配置远程仓库');
+                }
+
+                res.json({ success: true, message: '仓库初始化成功' + (config.repo_url ? ' 并已配置远程仓库' : '') });
+
+            } catch (error) {
+                console.error('[cloud-saves] 初始化仓库时发生错误:', error);
+                res.status(500).json({ success: false, message: `初始化仓库时发生错误: ${error.message}` });
+            } finally {
+                currentOperation = null;
             }
-        }
+        });
 
     } catch (error) {
         console.error('[cloud-saves] 初始化失败:', error);
