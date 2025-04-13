@@ -103,7 +103,7 @@ async function readConfig() {
         // 如果配置文件不存在或解析失败，创建默认配置
         console.warn('Failed to read or parse config, creating default:', error.message);
         await fs.writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
-        return { ...DEFAULT_CONFIG }; 
+        return { ...DEFAULT_CONFIG };
     }
 }
 
@@ -364,8 +364,8 @@ async function createSave(name, description) {
              currentBranch = symbolicRefResult.stdout.trim();
               // 只推送当前配置的分支上的提交
               if (currentBranch === branchToPush && commitNeeded) {
-                  console.log(`[cloud-saves] 推送分支: ${currentBranch}`);
-                  const pushBranchResult = await runGitCommand(`git push origin ${currentBranch}`);
+                 console.log(`[cloud-saves] 推送分支: ${currentBranch}`);
+                 const pushBranchResult = await runGitCommand(`git push origin ${currentBranch}`);
                   if (!pushBranchResult.success) {
                       console.warn(`[cloud-saves] 推送分支 ${currentBranch} 失败:`, pushBranchResult.stderr);
                       // 可选：如果推送分支失败，可能不应该继续推送标签，取决于策略
@@ -373,7 +373,7 @@ async function createSave(name, description) {
                   }
               } else if (commitNeeded) {
                   console.log(`[cloud-saves] 当前不在配置的分支 (${branchToPush})，跳过推送提交。当前分支: ${currentBranch}`);
-              }
+             }
         } else {
             console.log('[cloud-saves] 当前处于 detached HEAD 状态，跳过推送分支。');
         }
@@ -627,7 +627,7 @@ async function renameSave(oldTagName, newName, description) {
         const tagCommitResult = await runGitCommand(`git rev-list -n 1 "${oldTagName}"`);
         if (!tagCommitResult.success) return { success: false, message: '获取存档提交失败', details: tagCommitResult };
         const commit = tagCommitResult.stdout.trim();
-        
+
         // 3. 解码旧名称以供比较
         let oldDecodedName = oldTagName;
         const oldNameMatch = oldTagName.match(/^save_\d+_(.+)$/);
@@ -662,22 +662,22 @@ async function renameSave(oldTagName, newName, description) {
         } else {
             // 名称已更改，执行完整的重命名流程
             console.log(`[cloud-saves] 名称已更改，执行完整重命名流程...`);
-            // 使用 Base64 编码新名称
-            const encodedNewName = Buffer.from(newName).toString('base64url');
+        // 使用 Base64 编码新名称
+        const encodedNewName = Buffer.from(newName).toString('base64url');
             // 使用当前时间戳创建新标签名，而不是旧的
             const newTagName = `save_${Date.now()}_${encodedNewName}`; 
-            
+
             console.log(`[cloud-saves] 创建新标签: ${newTagName}`);
             const tagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${newTagName}" -m "${fullNewMessage}" ${commit}`);
-            if (!tagResult.success) return { success: false, message: '创建新存档标签失败', details: tagResult };
+        if (!tagResult.success) return { success: false, message: '创建新存档标签失败', details: tagResult };
 
             console.log(`[cloud-saves] 推送新标签: ${newTagName}`);
-            const pushTagResult = await runGitCommand(`git push origin "${newTagName}"`);
-            if (!pushTagResult.success) {
+        const pushTagResult = await runGitCommand(`git push origin "${newTagName}"`);
+        if (!pushTagResult.success) {
                 // 如果推送失败，删除本地创建的新标签
-                await runGitCommand(`git tag -d "${newTagName}"`); 
-                return { success: false, message: '推送新存档标签到远程失败', details: pushTagResult };
-            }
+            await runGitCommand(`git tag -d "${newTagName}"`);
+            return { success: false, message: '推送新存档标签到远程失败', details: pushTagResult };
+        }
 
             console.log(`[cloud-saves] 删除旧本地标签: ${oldTagName}`);
             await runGitCommand(`git tag -d "${oldTagName}"`); // 忽略本地删除错误
@@ -685,13 +685,13 @@ async function renameSave(oldTagName, newName, description) {
             await runGitCommand(`git push origin :refs/tags/${oldTagName}`); // 忽略远程删除错误
 
             // 更新配置中的 current_save (如果适用)
-            if (config.current_save && config.current_save.tag === oldTagName) {
-                config.current_save.tag = newTagName;
-                await saveConfig(config);
-            }
+        if (config.current_save && config.current_save.tag === oldTagName) {
+            config.current_save.tag = newTagName;
+            await saveConfig(config);
+        }
 
-            // 返回原始新名称给前端
-            return { success: true, message: '存档重命名成功', oldTag: oldTagName, newTag: newTagName, newName: newName };
+        // 返回原始新名称给前端
+        return { success: true, message: '存档重命名成功', oldTag: oldTagName, newTag: newTagName, newName: newName };
         }
 
     } catch (error) {
@@ -1020,7 +1020,12 @@ async function init(router) {
                 const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
                 if (!fetchTagsResult.success) {
                     await saveConfig(config); // 保存未授权状态
-                    return res.status(401).json({ success: false, message: '授权失败：无法访问远程仓库或获取标签，请检查URL和Token权限', details: fetchTagsResult });
+                    // 修改：返回 400 Bad Request 而不是 401
+                    return res.status(400).json({ 
+                        success: false, 
+                        message: '配置错误或权限不足：无法访问远程仓库或获取标签，请检查URL、Token权限和分支名称。', 
+                        details: fetchTagsResult 
+                    });
                 }
                 console.log("[cloud-saves] 获取标签成功。");
                 
