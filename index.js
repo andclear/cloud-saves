@@ -1015,14 +1015,17 @@ async function init(router) {
                     return res.status(500).json({ success: false, message: remoteResult.message, details: remoteResult });
                 }
 
-                // 4. 尝试访问远程仓库 (git fetch)
-                const fetchResult = await runGitCommand('git fetch origin');
-                if (!fetchResult.success) {
+                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
+                console.log("[cloud-saves] 检查远程连接并获取标签...");
+                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
+                if (!fetchTagsResult.success) {
                     await saveConfig(config); // 保存未授权状态
-                    return res.status(401).json({ success: false, message: '授权失败：无法访问远程仓库，请检查URL和Token权限', details: fetchResult });
+                    return res.status(401).json({ success: false, message: '授权失败：无法访问远程仓库或获取标签，请检查URL和Token权限', details: fetchTagsResult });
                 }
-
-                // 5. 检查目标分支是否存在于远程
+                console.log("[cloud-saves] 获取标签成功。");
+                
+                // 5. 检查目标分支是否存在于远程 (ls-remote 已经会使用 token)
+                console.log(`[cloud-saves] 检查远程分支 ${targetBranch}...`);
                 const checkRemoteBranchResult = await runGitCommand(`git ls-remote --heads origin ${targetBranch}`);
                 const remoteBranchExists = checkRemoteBranchResult.success && checkRemoteBranchResult.stdout.includes(`refs/heads/${targetBranch}`);
 
@@ -1384,19 +1387,29 @@ async function init(router) {
                 console.warn('[cloud-saves] 未配置远程仓库或无法获取，尝试重新配置');
                 await configureRemote(config.repo_url);
             }
-            const fetchResult = await runGitCommand('git fetch origin');
-            if (!fetchResult.success) {
-                console.error('[cloud-saves] 无法连接到配置的远程仓库，可能需要重新授权。');
+            // 修改：初始化时也进行更精确的 fetch
+            console.log("[cloud-saves] 初始化：获取远程标签...");
+            const initFetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags');
+            if (!initFetchTagsResult.success) {
+                console.error('[cloud-saves] 初始化时无法获取远程标签，可能需要重新授权。');
                 config.is_authorized = false;
                 await saveConfig(config);
             } else {
-                console.log('[cloud-saves] 成功连接到远程仓库。');
-                // 尝试切换到配置的分支
+                console.log('[cloud-saves] 初始化：获取标签成功。');
+                // 尝试获取并切换到配置的分支
                 const branch = config.branch || DEFAULT_BRANCH;
-                const checkoutResult = await runGitCommand(`git checkout ${branch}`);
-                if (!checkoutResult.success) {
-                    console.warn(`[cloud-saves] 初始化时切换到分支 ${branch} 失败: ${checkoutResult.stderr}. 可能需要先授权一次来创建或同步分支。`);
-                }
+                console.log(`[cloud-saves] 初始化：获取远程分支 ${branch}...`);
+                const initFetchBranchResult = await runGitCommand(`git fetch origin ${branch}`);
+                if (!initFetchBranchResult.success) {
+                     // 如果获取特定分支失败（例如分支被删除），记录警告但可能不直接标记为未授权
+                     console.warn(`[cloud-saves] 初始化时无法获取远程分支 ${branch}: ${initFetchBranchResult.stderr}. 插件可能仍可工作，但建议检查分支设置。`);
+                 } else {
+                     console.log(`[cloud-saves] 初始化：获取分支 ${branch} 成功。尝试切换...`);
+                    const checkoutResult = await runGitCommand(`git checkout ${branch}`);
+                    if (!checkoutResult.success) {
+                        console.warn(`[cloud-saves] 初始化时切换到分支 ${branch} 失败: ${checkoutResult.stderr}. 可能需要先授权一次来创建或同步分支。`);
+                    }
+                 }
             }
         }
 
