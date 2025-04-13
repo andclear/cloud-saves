@@ -206,7 +206,7 @@ document.addEventListener('DOMContentLoaded', function() {
             autoSaveTargetTagInput.value = currentAutoSaveConfig.targetTag;
             // 根据开关状态显示/隐藏选项
             autoSaveOptionsDiv.style.display = currentAutoSaveConfig.enabled ? 'flex' : 'none';
-
+            
             isAuthorized = config.is_authorized;
             
             updateAuthUI(isAuthorized);
@@ -755,7 +755,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             await apiCall('config', 'POST', {
                 repo_url: repoUrlInput.value, 
-                github_token: '', 
+                github_token: '',
                 display_name: displayNameInput.value,
                 branch: 'main',
                 is_authorized: false
