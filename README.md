@@ -33,7 +33,7 @@
 
 ## 配置
 
-1.  **打开插件界面**: 在 SillyTavern 界面左侧菜单找到 "Plugins" (或 "插件")，点击进入，然后选择 "Cloud Saves"。
+1.  **打开插件界面**: 在 SillyTavern 界面左侧菜单找到 "Plugins" (或 "插件")，点击进入，然后选择 "Cloud Saves"。或者，直接访问: `http://127.0.0.1:8000/api/plugins/cloud-saves/ui` (请将 `8000` 替换为您 SillyTavern 的实际端口号，如果不同)。
 2.  **准备 GitHub 仓库**:
     *   在 GitHub 上创建一个新的**私有**仓库（推荐）。你**不需要**预先在里面放任何文件。
     *   复制这个仓库的 URL (例如 `https://github.com/your-username/your-repo-name`)。
@@ -68,13 +68,3 @@
 
 - 需要你的服务器环境已安装 Git。
 - 操作需要网络连接 GitHub。
-
-## 技术细节
-
-- **后端**：Node.js, Express.js
-- **核心逻辑**：通过 `child_process` 执行 Git 命令
-- **前端**：HTML, CSS (Bootstrap 5), JavaScript
-
----
-
-*由 AI 助手协助创建* 
