@@ -1,66 +1,112 @@
-# SillyTavern 云存档插件
+# SillyTavern 数据同步插件
 
-## 概述
+这个插件允许你使用 Git 来同步 SillyTavern 的 `/data` 目录，方便在多个设备间共享角色、聊天记录和设置。
 
-这是一个为 SillyTavern 设计的云存档插件，允许用户将 `/data` 目录的状态作为存档点保存到指定的 GitHub 仓库中。它提供了存档、回档、删除、重命名和比较存档差异等功能。
+## 功能
 
-## 功能特性
+- 使用 GitHub 仓库同步数据
+- 一键上传/下载数据
+- 支持 GitHub OAuth 授权和个人访问令牌认证
+- 自动定时同步功能
+- 美观现代的用户界面
+- 显示详细的 Git 状态信息
+- 查看最近的提交历史
 
-- **基于 Git 标签**：每个存档都是一个 Git 标签，轻量且易于管理。
-- **云端存储**：所有存档数据（标签和提交）存储在您的 GitHub 仓库中。
-- **用户友好的界面**：提供直观的界面来管理存档。
-- **主要操作**：
-    - 创建新存档（带名称和描述）
-    - 列出、搜索和排序存档
-    - 加载（回档）到任意存档点
-    - 删除存档
-    - 重命名存档
-    - 比较存档与当前状态的差异
-- **工作区安全**：在加载存档前自动暂存未提交的更改，并允许用户恢复或丢弃这些更改。
+## 安装
 
-## 安装与配置
+1. 确保你已经在系统上安装了 [Git](https://git-scm.com/downloads)。
+2. 将此插件目录 (`data-sync`) 放入 SillyTavern 的 `plugins` 文件夹。
+3. 在 SillyTavern 的 `config.yaml` 文件中，确保 `enableServerPlugins: true`。
+4. 在插件目录中安装依赖：
+   ```bash
+   cd plugins/data-sync
+   npm install
+   ```
+5. 重启 SillyTavern 服务器。
 
-1.  **放置插件**：将 `cloud_saves` 文件夹放置到 SillyTavern 的 `plugins` 目录下。
-2.  **重启 SillyTavern**：确保 SillyTavern 重新加载插件。
-3.  **打开插件界面**：在 SillyTavern 的插件菜单中找到并打开"Cloud Saves"。
-4.  **创建 GitHub 仓库**：
-    - 如果您还没有用于存储存档的仓库，请在 GitHub 上创建一个**私有**仓库（推荐）。
-    - 您**不需要**在仓库中预先创建任何文件。
-5.  **生成 GitHub 访问令牌**：
-    - 前往您的 GitHub [开发者设置 > 个人访问令牌](https://github.com/settings/tokens)。
-    - 创建一个新的令牌（Fine-grained tokens 或 Classic tokens 均可）。
-    - 确保证令牌具有 `repo` 权限（或者对于 Fine-grained tokens，至少对您创建的存档仓库具有读写权限）。
-    - **复制生成的令牌**，您将无法再次看到它。
-6.  **授权插件**：
-    - 在插件界面的"仓库授权设置"部分：
-        - 粘贴您的 GitHub 仓库 URL（例如 `https://github.com/your-username/your-repo-name`）。
-        - 粘贴您刚刚生成的 GitHub 访问令牌。
-        - 点击"授权并连接"按钮。
-    - 如果一切顺利，状态将显示为已授权，并且存档管理部分将变为可用。
+## 配置 GitHub 仓库
+
+使用前，您需要创建一个 GitHub 仓库：
+
+1. 在 [GitHub](https://github.com) 上创建一个新的仓库。强烈建议将仓库设置为**私有**，以保护您的数据隐私。
+2. 在插件界面中输入仓库 URL，格式为 `https://github.com/用户名/仓库名.git` 或 `git@github.com:用户名/仓库名.git`。
+
+## GitHub 授权
+
+插件提供两种授权方式：
+
+### 1. GitHub OAuth 授权 (推荐)
+
+1. 在插件界面中点击 "通过 GitHub 授权" 按钮。
+2. 在弹出的新窗口中登录 GitHub 并授权应用。
+3. 授权成功后，窗口将自动关闭，插件状态将更新为 "已授权"。
+
+> **注意**：首次使用前，管理员需要创建 GitHub OAuth 应用，并在插件配置中设置 Client ID 和 Client Secret。
+> 详见下方 "管理员配置" 部分。
+
+### 2. 个人访问令牌 (PAT)
+
+如果不想使用 OAuth 授权，您也可以使用个人访问令牌：
+
+1. 访问 [GitHub 个人访问令牌设置页面](https://github.com/settings/tokens/new?scopes=repo&description=SillyTavern%20Data%20Sync)。
+2. 确保选择了 `repo` 权限。
+3. 生成令牌并复制。
+4. 将令牌粘贴到插件界面的 "访问令牌" 输入框中。
+5. 点击 "保存配置" 按钮。
 
 ## 使用方法
 
-- **创建存档**：输入存档名称（必填）和描述（可选），然后点击"保存当前状态"按钮。
-- **加载存档**：在存档列表中找到您想要恢复的存档，点击右侧的 <i class="bi bi-cloud-download"></i> (加载) 按钮，并在确认对话框中确认。
-- **重命名存档**：点击存档卡片上的 <i class="bi bi-pencil"></i> (重命名) 按钮，在弹出的模态框中修改名称和描述，然后保存。
-- **删除存档**：点击存档卡片上的 <i class="bi bi-trash"></i> (删除) 按钮，并在确认对话框中确认。
-- **比较差异**：点击存档卡片上的 <i class="bi bi-file-diff"></i> (差异) 按钮，可以查看该存档与您当前 `/data` 目录状态之间的文件差异。
-- **搜索与排序**：使用列表上方的搜索框和排序下拉菜单来查找和整理存档。
-- **恢复临时更改**：如果在加载存档时有未提交的更改被暂存，界面下方会出现通知，您可以选择"恢复这些更改"或"丢弃这些更改"。
+1. 启动 SillyTavern 后，访问 `http://localhost:YOUR_PORT/api/plugins/data-sync/ui`。
+2. 在配置面板中：
+   - 输入您的 GitHub 仓库 URL
+   - 选择并完成授权方式（OAuth 或访问令牌）
+   - 如需自动同步，勾选 "启用自动同步" 并设置同步间隔
+3. 点击 "保存配置"，然后点击 "初始化仓库"。
+4. 使用 "上传" 按钮将数据推送到 GitHub，或使用 "下载" 按钮拉取最新的更改。
+
+## 管理员配置
+
+### GitHub OAuth 应用设置
+
+要启用 OAuth 授权功能，管理员需要：
+
+1. 在 [GitHub 开发者设置](https://github.com/settings/developers) 中创建一个新的 OAuth 应用。
+2. 设置主页 URL 为您的 SillyTavern 地址（如 `http://localhost:8000`）。
+3. 设置回调 URL 为 `http://您的域名/api/plugins/data-sync/oauth-callback`。
+4. 获取 Client ID 和 Client Secret。
+5. 设置环境变量或修改插件代码中的这些值：
+   ```
+   GITHUB_CLIENT_ID=您的客户端ID
+   GITHUB_CLIENT_SECRET=您的客户端密钥
+   OAUTH_REDIRECT_URI=http://您的域名/api/plugins/data-sync/oauth-callback
+   ```
 
 ## 注意事项
 
-- **Git 环境**：请确保您的服务器环境已安装 Git。
-- **网络连接**：所有与远程仓库交互的操作都需要稳定的网络连接。
-- **仓库权限**：提供的 GitHub 令牌必须具有对目标仓库的读写权限。
-- **大型文件**：如果您的 `data` 目录包含非常大的文件，建议在您的 Git 仓库中启用并配置 Git LFS (Large File Storage) 以获得更好的性能。
+- 首次使用时，确保 `/data` 目录中的数据已备份，以防意外覆盖。
+- 合并冲突：如果在不同设备上同时修改了同一文件，可能会发生合并冲突。此时可能需要手动解决冲突。
+- 大文件：避免同步大型二进制文件（如音频、图像），以保持仓库大小合理。
+- 安全考虑：访问令牌具有访问您 GitHub 帐户的权限，请妥善保管。建议仅给予必要的最小权限。
 
-## 技术细节
+## 隐私与安全
 
-- **后端**：Node.js, Express.js
-- **核心逻辑**：通过 `child_process` 执行 Git 命令
-- **前端**：HTML, CSS (Bootstrap 5), JavaScript
+- 此插件仅同步 SillyTavern 的 `/data` 目录。
+- 建议使用私有 GitHub 仓库，以保护您的数据隐私。
+- OAuth 授权和访问令牌都受到保护，存储在服务器端的配置文件中，不会暴露给浏览器。
+- 敏感信息（如 API 密钥）不应存储在同步的文件中。
 
----
+## 未来计划
 
-*由 AI 助手协助创建* 
+- 支持更多同步服务提供商（如 Dropbox、Google Drive）
+- 完善定时自动同步功能
+- 添加文件选择性同步功能
+- 实现分支管理和冲突解决
+- 支持多用户授权
+
+## 许可证
+
+本插件采用 MIT 许可证。
+
+## 问题反馈
+
+如有问题或建议，请在 GitHub 仓库中创建 issue。 
