@@ -65,9 +65,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const autoSaveTargetTagInput = document.getElementById('auto-save-target-tag');
     const saveAutoSaveSettingsBtn = document.getElementById('save-auto-save-settings-btn');
 
-    // 新增：检查更新按钮
-    const checkUpdateBtn = document.getElementById('check-update-btn');
-
     // API调用工具函数
     async function apiCall(endpoint, method = 'GET', data = null) {
         const options = {
@@ -1052,9 +1049,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 'auto-save-enabled');
     safeAddEventListener(saveAutoSaveSettingsBtn, 'click', saveAutoSaveConfiguration, 'save-auto-save-settings-btn');
 
-    // 新增：检查更新按钮事件
-    safeAddEventListener(checkUpdateBtn, 'click', checkAndApplyUpdate, 'check-update-btn');
-
     // --- 新增：初始化仓库函数 ---
     async function initializeRepository() {
         try {
@@ -1079,39 +1073,6 @@ document.addEventListener('DOMContentLoaded', function() {
             hideLoading();
             console.error('初始化仓库失败:', error);
             showToast('错误', `初始化仓库失败: ${error.message}`, 'error');
-        }
-    }
-
-    // --- 新增：检查更新函数 ---
-    async function checkAndApplyUpdate() {
-        try {
-            showLoading('正在检查插件更新...');
-            const result = await apiCall('update/check-and-pull', 'POST');
-
-            if (result.success) {
-                let message = result.message || '操作完成';
-                let type = 'info';
-                if (result.status === 'latest') {
-                    type = 'success';
-                    message = '插件已是最新版本。'
-                } else if (result.status === 'updated') {
-                    type = 'success';
-                    message = '插件更新成功！请务必重启 SillyTavern 服务以应用更改。';
-                } else if (result.status === 'not_git_repo') {
-                    type = 'warning';
-                    message = '无法自动更新：插件似乎不是通过 Git 安装的。'
-                }
-                showToast('检查更新', message, type);
-            } else {
-                // 如果 success 为 false，也显示消息
-                 showToast('更新失败', result.message || '检查或应用更新时发生未知错误。', 'error');
-            }
-
-            hideLoading();
-        } catch (error) {
-            hideLoading();
-            console.error('检查更新失败:', error);
-            showToast('错误', `检查更新时发生错误: ${error.message}`, 'error');
         }
     }
 
