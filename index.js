@@ -424,8 +424,9 @@ async function listSaves() {
         currentOperation = 'list_saves';
         console.log('[cloud-saves] 获取存档列表');
         
-        const fetchResult = await runGitCommand('git fetch --tags');
-        if (!fetchResult.success) return { success: false, message: '从远程获取标签失败', details: fetchResult };
+        // 修改 fetch 命令，使用精确 refspec
+        const fetchTagsResult = await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags');
+        if (!fetchTagsResult.success) return { success: false, message: '从远程获取标签失败', details: fetchTagsResult };
 
         // 修改 format，添加 %(taggername) 和 %(contents) 获取完整 tag 消息体
         const formatString = "%(refname:short)%00%(creatordate:iso)%00%(taggername)%00%(subject)%00%(contents)";
@@ -1149,16 +1150,16 @@ async function init(router) {
                     return res.status(500).json({ success: false, message: remoteResult.message, details: remoteResult });
                 }
 
-                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
+                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch + 精确 refspec
                 console.log("[cloud-saves] 检查远程连接并获取标签...");
-                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
-                if (!fetchTagsResult.success) {
+                const fetchTagsResultAuth = await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags'); // 使用精确 refspec
+                if (!fetchTagsResultAuth.success) {
                     await saveConfig(config); // 保存未授权状态
                     // 修改：返回 400 Bad Request 而不是 401
                     return res.status(400).json({ 
                         success: false, 
                         message: '配置错误或权限不足：无法访问远程仓库或获取标签，请检查URL、Token权限和分支名称。', 
-                        details: fetchTagsResult 
+                        details: fetchTagsResultAuth 
                     });
                 }
                 console.log("[cloud-saves] 获取标签成功。");
@@ -1263,9 +1264,11 @@ async function init(router) {
             // 确保在获取前拉取最新的标签和分支信息
             const config = await readConfig();
             if (config.is_authorized) {
-                 await runGitCommand('git fetch origin --tags');
+                 // 修改 fetch 命令，使用精确 refspec
+                 await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags');
                  const branch = config.branch || DEFAULT_BRANCH;
-                 await runGitCommand(`git fetch origin ${branch}`); // 拉取当前分支的更新
+                 // 使用精确 refspec 获取分支
+                 await runGitCommand(`git fetch origin refs/heads/${branch}:refs/remotes/origin/${branch}`);
             }
             try {
                 const result = await listSaves();
