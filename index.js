@@ -115,33 +115,41 @@ async function saveConfig(config) {
 
 // ========== Git 操作核心功能 ==========
 
-// 执行git命令
+// 执行git命令 - 修改：增加可选的 cwd 参数
 async function runGitCommand(command, options = {}) {
     let config = {};
     let originalRepoUrl = '';
     let tokenUrl = '';
     let temporarilySetUrl = false;
+    const executeIn = options.cwd || DATA_DIR; // 优先使用传入的 cwd，否则默认 DATA_DIR
 
     try {
         config = await readConfig();
         const token = config.github_token;
-        originalRepoUrl = config.repo_url;
-
-        // 特殊处理推送/拉取/获取/列出远程引用时使用token
-        if (token && originalRepoUrl && originalRepoUrl.startsWith('https://') && 
-            (command.startsWith('git push') || command.startsWith('git pull') || command.startsWith('git fetch') || command.startsWith('git ls-remote'))) {
+        // 读取指定目录下的远程 URL
+        let remoteShowResult;
+        try {
+            remoteShowResult = await execPromise('git remote get-url origin', { cwd: executeIn });
+            originalRepoUrl = remoteShowResult.stdout.trim();
+        } catch (getRemoteError) {
+            // 如果获取远程URL失败（例如还没设置远程），则 originalRepoUrl 保持空
+             console.warn(`[cloud-saves] 在目录 ${executeIn} 获取 remote URL 失败:`, getRemoteError.stderr || getRemoteError.message);
+             originalRepoUrl = ''; // 确保为空
+        }
+        
+        // 特殊处理推送/拉取/获取/列出远程引用时使用token (只在 DATA_DIR 中执行时才用 token)
+        if (executeIn === DATA_DIR && token && originalRepoUrl && originalRepoUrl.startsWith('https://') && 
+            (command.startsWith('git push') || command.startsWith('git pull') || command.startsWith('git fetch') || command.startsWith('git ls-remote'))) { 
             if (!originalRepoUrl.includes('@github.com')) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                
-                console.log(`[cloud-saves] 临时设置带token的remote URL，执行命令: ${command}`);
-                const setUrlResult = await execPromise(`git remote set-url origin ${tokenUrl}`, { cwd: DATA_DIR });
-                console.log('[cloud-saves] set-url (with token) stdout:', setUrlResult.stdout);
-                console.log('[cloud-saves] set-url (with token) stderr:', setUrlResult.stderr);
+                console.log(`[cloud-saves] DATA_DIR: 临时设置带token的remote URL，执行命令: ${command}`);
+                // 注意：这里的 set-url 仍然是在 DATA_DIR 操作
+                await execPromise(`git remote set-url origin ${tokenUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = true;
             }
         }
 
-        // 对clone命令也要修改URL
+        // 对clone命令也要修改URL (通常不在插件目录执行)
         if (token && originalRepoUrl && originalRepoUrl.startsWith('https://') && command.startsWith('git clone')) {
             if (!originalRepoUrl.includes('@github.com')) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
@@ -149,13 +157,13 @@ async function runGitCommand(command, options = {}) {
             }
         }
 
-        // 记录要执行的命令
-        console.log(`[cloud-saves] 执行命令: ${command}`);
+        // 记录要执行的命令和目录
+        console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${command}`);
 
         // 处理选项参数
         const execOptions = { 
-            cwd: options.cwd || DATA_DIR 
-        };
+            cwd: executeIn // 使用确定的执行目录
+        }; 
         
         // 处理标准输入
         if (options && options.input !== undefined) {
@@ -200,9 +208,9 @@ async function runGitCommand(command, options = {}) {
             // 常规命令执行
             const { stdout, stderr } = await execPromise(command, execOptions);
             
-            // 如果临时设置了URL，命令完成后恢复
-            if (temporarilySetUrl) {
-                console.log(`[cloud-saves] 恢复原始remote URL: ${originalRepoUrl}`);
+            // 如果临时设置了URL，命令完成后恢复 (只针对 DATA_DIR)
+            if (temporarilySetUrl && executeIn === DATA_DIR) {
+                console.log(`[cloud-saves] DATA_DIR: 恢复原始remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = false;
             }
@@ -216,16 +224,16 @@ async function runGitCommand(command, options = {}) {
         if (command.startsWith('git diff --binary')) {
             stdoutLog = '[二进制差异内容已省略]';
         }
-        console.error(`Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
+        console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
         
-        // 如果临时设置了URL且命令失败，尝试恢复
-        if (temporarilySetUrl) {
+        // 如果临时设置了URL且命令失败，尝试恢复 (只针对 DATA_DIR)
+        if (temporarilySetUrl && executeIn === DATA_DIR) {
             try {
-                console.warn(`[cloud-saves] 命令失败，尝试恢复原始remote URL: ${originalRepoUrl}`);
+                console.warn(`[cloud-saves] DATA_DIR: 命令失败，尝试恢复原始remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = false;
             } catch (revertError) {
-                console.error(`[cloud-saves] 恢复remote URL失败: ${revertError.message}`);
+                console.error(`[cloud-saves] DATA_DIR: 恢复remote URL失败: ${revertError.message}`);
             }
         }
 
@@ -236,13 +244,13 @@ async function runGitCommand(command, options = {}) {
             stderr: error.stderr || ''
         };
     } finally {
-        // 最终安全检查：确保URL被恢复
-        if (temporarilySetUrl) {
+        // 最终安全检查：确保URL被恢复 (只针对 DATA_DIR)
+        if (temporarilySetUrl && executeIn === DATA_DIR) {
             try {
-                console.warn(`[cloud-saves] 最终检查：在finally块中恢复remote URL: ${originalRepoUrl}`);
+                console.warn(`[cloud-saves] DATA_DIR: 最终检查：在finally块中恢复remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
             } catch (finalRevertError) {
-                console.error(`[cloud-saves] 在finally块中恢复remote URL失败: ${finalRevertError.message}`);
+                console.error(`[cloud-saves] DATA_DIR: 在finally块中恢复remote URL失败: ${finalRevertError.message}`);
             }
         }
     }
@@ -1570,83 +1578,90 @@ async function init(router) {
         // --- 新增：插件初始化完成后启动定时器 ---
         setupBackendAutoSaveTimer();
 
-        // --- 新增：检查并拉取更新接口 ---
+        // --- 新增：检查和执行更新接口 ---
         router.post('/update/check-and-pull', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
             }
             currentOperation = 'check_update';
-            const pluginDir = __dirname; // 插件的根目录
-            let updateResult = { success: false, status: 'error', message: '检查更新时发生未知错误。' };
+            const pluginDir = __dirname; // 插件目录
+            const targetRemote = 'https://github.com/fuwei99/cloud-saves.git'; // 目标更新源
+            const targetBranch = 'main';
 
             try {
-                console.log(`[Cloud Saves Update] 开始检查更新，插件目录: ${pluginDir}`);
+                console.log('[cloud-saves] 开始检查更新...');
 
                 // 1. 检查插件目录是否为 Git 仓库
                 const isRepoResult = await runGitCommand('git rev-parse --is-inside-work-tree', { cwd: pluginDir });
                 if (!isRepoResult.success || isRepoResult.stdout.trim() !== 'true') {
-                    console.warn('[Cloud Saves Update] 插件目录不是有效的 Git 仓库。');
-                    updateResult = { success: false, status: 'not-git-repo', message: '无法更新：插件似乎不是通过 Git 安装的。' };
-                    return res.json(updateResult);
-                }
-                console.log('[Cloud Saves Update] 插件目录是 Git 仓库。');
-
-                // 2. 获取远程 HEAD commit (简单起见，直接用 ls-remote HEAD)
-                // 注意：这里假设 origin 指向正确的仓库
-                console.log('[Cloud Saves Update] 获取远程最新 commit...');
-                const remoteResult = await runGitCommand('git ls-remote origin HEAD', { cwd: pluginDir });
-                if (!remoteResult.success || !remoteResult.stdout) {
-                    console.error('[Cloud Saves Update] 获取远程 commit 失败:', remoteResult.stderr);
-                    throw new Error(`获取远程版本信息失败: ${remoteResult.stderr}`);
-                }
-                const remoteCommit = remoteResult.stdout.split('\t')[0];
-                console.log(`[Cloud Saves Update] 远程最新 commit: ${remoteCommit}`);
-
-                // 3. 获取本地 HEAD commit
-                console.log('[Cloud Saves Update] 获取本地 commit...');
-                const localResult = await runGitCommand('git rev-parse HEAD', { cwd: pluginDir });
-                if (!localResult.success || !localResult.stdout) {
-                     console.error('[Cloud Saves Update] 获取本地 commit 失败:', localResult.stderr);
-                    throw new Error(`获取本地版本信息失败: ${localResult.stderr}`);
-                }
-                const localCommit = localResult.stdout.trim();
-                console.log(`[Cloud Saves Update] 本地 commit: ${localCommit}`);
-
-                // 4. 比较版本
-                if (remoteCommit === localCommit) {
-                    console.log('[Cloud Saves Update] 本地已是最新版本。');
-                    updateResult = { success: true, status: 'up-to-date', message: '插件已是最新版本。' };
-                } else {
-                    console.log('[Cloud Saves Update] 检测到新版本，尝试拉取更新...');
-                    // 5. 执行更新 (git pull)
-                    const pullResult = await runGitCommand('git pull origin main', { cwd: pluginDir }); // 假设更新来自 main 分支
-                    if (!pullResult.success) {
-                        console.error('[Cloud Saves Update] git pull 失败:', pullResult.stderr);
-                         // 检查是否是冲突错误
-                         if (pullResult.stderr.toLowerCase().includes('conflict')) {
-                             throw new Error(`更新失败：检测到文件冲突，请手动解决冲突或重新克隆插件。 Stderr: ${pullResult.stderr}`);
-                         } else if (pullResult.stderr.toLowerCase().includes('please commit your changes or stash them')) {
-                            throw new Error(`更新失败：您有未提交的本地更改，请先提交或储藏。 Stderr: ${pullResult.stderr}`);
-                         } else {
-                            throw new Error(`更新失败: ${pullResult.stderr}`);
-                         }
-                    }
-                    console.log('[Cloud Saves Update] git pull 成功。');
-                    updateResult = { success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' };
+                    console.warn('[cloud-saves] 插件目录不是有效的 Git 仓库，无法自动更新。');
+                    return res.json({ success: true, status: 'not_git_repo', message: '无法自动更新：插件似乎不是通过 Git 安装的。' });
                 }
 
-                res.json(updateResult);
+                // 2. 检查远程地址是否匹配
+                const remoteUrlResult = await runGitCommand('git remote get-url origin', { cwd: pluginDir });
+                if (!remoteUrlResult.success || remoteUrlResult.stdout.trim() !== targetRemote) {
+                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${remoteUrlResult.stdout.trim()}) 与目标 (${targetRemote}) 不匹配，无法安全更新。`);
+                     return res.json({ success: false, status: 'wrong_remote', message: `无法更新：插件远程地址 (${remoteUrlResult.stdout.trim() || '未设置'}) 与预期 (${targetRemote}) 不符。` });
+                 }
+
+                // 3. 获取本地 HEAD 哈希
+                const localHeadResult = await runGitCommand('git rev-parse HEAD', { cwd: pluginDir });
+                if (!localHeadResult.success) {
+                    throw new Error('无法获取本地版本信息。');
+                }
+                const localHash = localHeadResult.stdout.trim();
+                console.log(`[cloud-saves] 本地版本: ${localHash}`);
+
+                // 4. 获取远程 HEAD 哈希
+                console.log(`[cloud-saves] 获取远程 ${targetBranch} 分支版本...`);
+                // 注意：ls-remote 不需要 token，因为是公共仓库
+                const remoteHeadResult = await runGitCommand(`git ls-remote origin refs/heads/${targetBranch}`, { cwd: pluginDir });
+                if (!remoteHeadResult.success || !remoteHeadResult.stdout.trim()) {
+                     throw new Error(`无法获取远程 ${targetBranch} 分支版本信息。`);
+                 }
+                 // 修复：正确分割并获取哈希
+                const remoteHash = remoteHeadResult.stdout.trim().split(/\s+/)[0]; // 使用正则表达式分割空白
+                console.log(`[cloud-saves] 远程版本: ${remoteHash}`);
+
+                // 5. 比较哈希
+                if (localHash === remoteHash) {
+                    console.log('[cloud-saves] 当前已是最新版本。');
+                    return res.json({ success: true, status: 'latest', message: '已是最新版本。' });
+                }
+
+                // 6. 执行更新 (git pull)
+                console.log('[cloud-saves] 检测到新版本，尝试执行 git pull...');
+                const pullResult = await runGitCommand(`git pull origin ${targetBranch}`, { cwd: pluginDir });
+                
+                if (!pullResult.success) {
+                    console.error('[cloud-saves] git pull 失败:', pullResult.stderr);
+                     // 检查是否是本地更改冲突
+                     if (pullResult.stderr.includes('Your local changes to the following files would be overwritten')) {
+                         return res.json({ success: false, status: 'pull_failed_local_changes', message: '更新失败：您对插件文件进行了本地修改，请先处理或移除这些修改。' });
+                     } else {
+                         // 修复：确保返回正确的错误信息
+                         return res.json({ 
+                            success: false, 
+                            status: 'pull_failed', 
+                            message: `更新失败：执行 git pull 时出错。错误: ${pullResult.stderr || pullResult.error || '未知错误'}` 
+                        });
+                     }
+                 }
+                
+                console.log('[cloud-saves] git pull 成功！');
+                return res.json({ success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' });
 
             } catch (error) {
-                console.error('[Cloud Saves Update] 检查/更新过程中出错:', error);
-                updateResult.message = `检查/更新过程中出错: ${error.message}`;
-                res.status(500).json(updateResult);
+                console.error('[cloud-saves] 检查或执行更新时出错:', error);
+                res.status(500).json({ success: false, status:'error', message: `检查更新时发生内部错误: ${error.message}` });
             } finally {
                 currentOperation = null;
             }
         });
-
-        // --- 初始化逻辑 --- (检查配置，连接远程等)
+        
+        // --- 初始化逻辑 --- (检查配置，连接远程等) - 修改：初始化后启动后端定时器
+        const config = await readConfig();
 
     } catch (error) {
         console.error('[cloud-saves] 初始化失败:', error);
