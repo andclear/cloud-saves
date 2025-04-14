@@ -1215,6 +1215,16 @@ async function init(router) {
                      }
                 }
 
+                // --- FIX: 添加 fetch 命令来获取分支信息 ---
+                console.log(`[cloud-saves] 获取远程分支 ${targetBranch} 的数据...`);
+                const fetchBranchResult = await runGitCommand(`git fetch origin refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`);
+                if (!fetchBranchResult.success) {
+                   // 如果获取分支失败，也算授权失败
+                    await saveConfig(config); 
+                    return res.status(500).json({ success: false, message: `无法获取远程分支 ${targetBranch} 的数据`, details: fetchBranchResult.stderr });
+                }
+                // -------------------------------------------
+
                 // 6. 标记为已授权并保存最终配置
                 config.is_authorized = true;
                 config.branch = targetBranch; // 确认分支已保存
