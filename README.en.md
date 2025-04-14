@@ -1,4 +1,4 @@
-[English Readme](./README.en.md)
+[中文说明](./README.md)
 # Cloud Saves - Easily Backup and Sync Your SillyTavern Data with GitHub!
 
 Hello everyone!
