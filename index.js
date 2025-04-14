@@ -1351,8 +1351,9 @@ async function init(router) {
                 }
 
                 // 8. 更新 config 中的 last_save (如果适用)
+                const saveNameMatch = tagName.match(/^save_\d+_(.+)$/);
                 let saveName = tagName;
-                if (saveNameMatch) {
+                if (saveNameMatch) { 
                     try {
                         saveName = Buffer.from(saveNameMatch[1], 'base64url').toString('utf8');
                     } catch (e) { /* ignore */ }
