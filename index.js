@@ -1211,19 +1211,28 @@ async function init(router) {
                 } else {
                     console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在`);
                      // 如果远程分支存在，确保本地也存在并跟踪它
-                     const trackResult = await runGitCommand(`git branch --track ${targetBranch} origin/${targetBranch}`);
-                     // 改进：检查更具体的错误消息
-                     const trackError = trackResult.stderr.toLowerCase();
-                     if (!trackResult.success && !trackError.includes('already exists') && !trackError.includes('already set up to track')) {
-                          console.warn(`[cloud-saves] 设置本地分支跟踪远程分支时出错: ${trackResult.stderr}`);
-                     }
-                     // 切换到目标分支
-                     const checkoutResult = await runGitCommand(`git checkout ${targetBranch}`);
+                     // 移除: 不再使用 git branch --track
+                     // const trackResult = await runGitCommand(`git branch --track ${targetBranch} origin/${targetBranch}`);
+                     // if (!trackResult.success && !trackError.includes('already exists') && !trackError.includes('already set up to track')) {
+                     //      console.warn(`[cloud-saves] 设置本地分支跟踪远程分支时出错: ${trackResult.stderr}`);
+                     // }
+                     
+                     // 切换到目标分支 - 使用更健壮的方式
+                     console.log(`[cloud-saves] 尝试切换到本地分支 ${targetBranch}...`);
+                     let checkoutResult = await runGitCommand(`git checkout ${targetBranch}`, { cwd: DATA_DIR }); // 在 data 目录执行 checkout
+                     
                      if (!checkoutResult.success) {
-                          console.error(`[cloud-saves] 切换到分支 ${targetBranch} 失败: ${checkoutResult.stderr}`);
-                         await saveConfig(config); // 保存未授权状态
-                         return res.status(500).json({ success: false, message: `无法切换到分支 ${targetBranch}`, details: checkoutResult.stderr });
+                         console.warn(`[cloud-saves] 直接切换到 ${targetBranch} 失败，尝试创建并切换...`);
+                         // 如果直接 checkout 失败，尝试创建跟踪分支并切换
+                         checkoutResult = await runGitCommand(`git checkout -b ${targetBranch} origin/${targetBranch}`, { cwd: DATA_DIR });
                      }
+
+                     if (!checkoutResult.success) {
+                          console.error(`[cloud-saves] 最终切换到分支 ${targetBranch} 失败: ${checkoutResult.stderr}`);
+                         await saveConfig(config); // 保存未授权状态
+                         return res.status(500).json({ success: false, message: `无法切换到目标分支 ${targetBranch}，请确保它在远程仓库存在且未损坏。`, details: checkoutResult.stderr });
+                     }
+                      console.log(`[cloud-saves] 成功切换到分支 ${targetBranch}`);
                 }
 
                 // 6. 标记为已授权并保存最终配置
