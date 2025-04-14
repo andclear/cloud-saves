@@ -194,7 +194,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (config.display_name) displayNameInput.value = config.display_name;
             if (config.branch) branchInput.value = config.branch;
             
-            // 新增：填充定时存档设置 (只填充 UI，不存前端状态)
+            // 修改：只填充UI，不管理定时器状态
             autoSaveEnabledSwitch.checked = config.autoSaveEnabled || false;
             autoSaveIntervalInput.value = config.autoSaveInterval || 30;
             autoSaveTargetTagInput.value = config.autoSaveTargetTag || '';
@@ -910,7 +910,46 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // 显示确认对话框 - 修改：增加按钮样式参数
+    // --- 修改：保存定时存档设置函数 (不再直接控制定时器) ---
+    async function saveAutoSaveConfiguration() {
+        const enabled = autoSaveEnabledSwitch.checked;
+        const interval = parseInt(autoSaveIntervalInput.value, 10) || 30;
+        const targetTag = autoSaveTargetTagInput.value.trim();
+
+        if (enabled && !targetTag) {
+            showToast('警告', '启用定时存档时，必须指定一个要覆盖的目标存档标签。', 'warning');
+            return false;
+        }
+
+        try {
+            showLoading('正在保存定时存档设置...');
+            // 调用 /config 接口保存所有配置 (后端会根据新配置重启定时器)
+            const result = await apiCall('config', 'POST', {
+                repo_url: repoUrlInput.value.trim(),
+                github_token: githubTokenInput.value.trim(), // 注意：这里如果为空或******，可能导致token被清空
+                display_name: displayNameInput.value.trim(),
+                branch: branchInput.value.trim() || 'main',
+                autoSaveEnabled: enabled,
+                autoSaveInterval: interval,
+                autoSaveTargetTag: targetTag
+            });
+
+            if (result.success) {
+                showToast('成功', '定时存档设置已保存 (后端将应用更改)', 'success');
+                hideLoading();
+                return true;
+            } else {
+                throw new Error(result.message || '保存定时设置失败');
+            }
+        } catch (error) {
+            hideLoading();
+            console.error('保存定时设置失败:', error);
+            showToast('错误', `保存定时设置失败: ${error.message}`, 'error');
+            return false;
+        }
+    }
+
+    // 显示确认对话框 ... (保持不变) ...
     function showConfirmDialog(title, message, callback, confirmButtonType = 'danger') { 
         const titleElement = document.getElementById('confirmModalLabel');
         const messageElement = document.getElementById('confirm-message'); // 直接获取元素
