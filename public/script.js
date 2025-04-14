@@ -5,6 +5,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentSaves = [];
     let confirmCallback = null;
     let renameTarget = null;
+    let autoSaveTimer = null; // 新增：定时器ID
+    let currentAutoSaveConfig = {}; // 新增：存储当前定时存档配置
 
     // 获取DOM元素引用
     const authSection = document.getElementById('auth-section');
@@ -194,12 +196,17 @@ document.addEventListener('DOMContentLoaded', function() {
             if (config.display_name) displayNameInput.value = config.display_name;
             if (config.branch) branchInput.value = config.branch;
             
-            // 修改：只填充UI，不管理定时器状态
-            autoSaveEnabledSwitch.checked = config.autoSaveEnabled || false;
-            autoSaveIntervalInput.value = config.autoSaveInterval || 30;
-            autoSaveTargetTagInput.value = config.autoSaveTargetTag || '';
+            // 新增：填充定时存档设置
+            currentAutoSaveConfig = {
+                enabled: config.autoSaveEnabled || false,
+                interval: config.autoSaveInterval || 30,
+                targetTag: config.autoSaveTargetTag || ''
+            };
+            autoSaveEnabledSwitch.checked = currentAutoSaveConfig.enabled;
+            autoSaveIntervalInput.value = currentAutoSaveConfig.interval;
+            autoSaveTargetTagInput.value = currentAutoSaveConfig.targetTag;
             // 根据开关状态显示/隐藏选项
-            autoSaveOptionsDiv.style.display = autoSaveEnabledSwitch.checked ? 'flex' : 'none';
+            autoSaveOptionsDiv.style.display = currentAutoSaveConfig.enabled ? 'flex' : 'none';
             
             isAuthorized = config.is_authorized;
             
@@ -208,6 +215,8 @@ document.addEventListener('DOMContentLoaded', function() {
             if (isAuthorized) {
                 await refreshStatus();
                 await loadSavesList();
+                // 授权成功后启动定时器（如果启用）
+                setupAutoSaveTimer();
             }
         } catch (error) {
             console.error('初始化失败:', error);
@@ -237,6 +246,9 @@ document.addEventListener('DOMContentLoaded', function() {
             createSaveSection.style.display = 'none';
             savesSection.style.display = 'none';
             autoSaveSection.style.display = 'none'; // 隐藏定时存档区域
+
+            // 未授权时停止定时器
+            clearAutoSaveTimer();
         }
     }
 
@@ -910,7 +922,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // --- 修改：保存定时存档设置函数 (不再直接控制定时器) ---
+    // --- 新增：保存定时存档设置函数 ---
     async function saveAutoSaveConfiguration() {
         const enabled = autoSaveEnabledSwitch.checked;
         const interval = parseInt(autoSaveIntervalInput.value, 10) || 30;
@@ -921,12 +933,13 @@ document.addEventListener('DOMContentLoaded', function() {
             return false;
         }
 
+        currentAutoSaveConfig = { enabled, interval, targetTag };
+
         try {
             showLoading('正在保存定时存档设置...');
-            // 调用 /config 接口保存所有配置 (后端会根据新配置重启定时器)
             const result = await apiCall('config', 'POST', {
                 repo_url: repoUrlInput.value.trim(),
-                github_token: githubTokenInput.value.trim(), // 注意：这里如果为空或******，可能导致token被清空
+                github_token: githubTokenInput.value.trim(),
                 display_name: displayNameInput.value.trim(),
                 branch: branchInput.value.trim() || 'main',
                 autoSaveEnabled: enabled,
@@ -935,8 +948,9 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             if (result.success) {
-                showToast('成功', '定时存档设置已保存 (后端将应用更改)', 'success');
+                showToast('成功', '定时存档设置已保存', 'success');
                 hideLoading();
+                setupAutoSaveTimer(); 
                 return true;
             } else {
                 throw new Error(result.message || '保存定时设置失败');
@@ -949,6 +963,41 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // --- 新增：设置/清除定时存档的定时器 ---
+    function setupAutoSaveTimer() {
+        clearAutoSaveTimer(); 
+        if (currentAutoSaveConfig.enabled && isAuthorized && currentAutoSaveConfig.targetTag) {
+            const intervalMilliseconds = currentAutoSaveConfig.interval * 60 * 1000;
+            if (intervalMilliseconds > 0) {
+                console.log(`[Cloud Saves] 启动定时存档，间隔 ${currentAutoSaveConfig.interval} 分钟，目标: ${currentAutoSaveConfig.targetTag}`);
+                autoSaveTimer = setInterval(async () => {
+                    console.log('[Cloud Saves] 定时器触发，执行自动覆盖存档...');
+                    showToast('信息', `正在自动存档到 ${currentAutoSaveConfig.targetTag}...`, 'info');
+                    try {
+                        await overwriteSave(currentAutoSaveConfig.targetTag);
+                        showToast('成功', `已自动存档到 ${currentAutoSaveConfig.targetTag}`, 'success');
+                    } catch (error) {
+                        console.error('[Cloud Saves] 自动存档失败:', error);
+                        showToast('错误', `自动存档到 ${currentAutoSaveConfig.targetTag} 失败: ${error.message}`, 'error');
+                    }
+                }, intervalMilliseconds);
+            } else {
+                console.warn('[Cloud Saves] 无效的定时存档间隔，定时器未启动。');
+            }
+        } else {
+            console.log('[Cloud Saves] 定时存档未启用、未授权或未指定目标标签，定时器未启动。');
+        }
+    }
+
+    // --- 新增：清除定时器函数 ---
+    function clearAutoSaveTimer() {
+        if (autoSaveTimer) {
+            console.log('[Cloud Saves] 清除定时存档定时器。');
+            clearInterval(autoSaveTimer);
+            autoSaveTimer = null;
+        }
+    }
+    
     // 显示确认对话框 ... (保持不变) ...
     function showConfirmDialog(title, message, callback, confirmButtonType = 'danger') { 
         const titleElement = document.getElementById('confirmModalLabel');

@@ -77,7 +77,6 @@ const DEFAULT_CONFIG = {
 
 // 当前操作状态
 let currentOperation = null;
-let autoSaveBackendTimer = null; // 后端定时器ID
 
 // ========== 配置管理 ==========
 
@@ -884,121 +883,6 @@ async function discardTempStash() {
     return { success: true, message: 'Temporary stash discarded' };
 }
 
-// --- 新增：执行自动覆盖存档的函数 (供定时器调用) ---
-async function performAutoSave() {
-    if (currentOperation) {
-        console.log(`[Cloud Saves Auto] 跳过自动存档，当前有操作正在进行: ${currentOperation}`);
-        return;
-    }
-    currentOperation = 'auto_save'; // 标记操作开始
-    let config;
-    try {
-        config = await readConfig();
-        if (!config.is_authorized || !config.autoSaveEnabled || !config.autoSaveTargetTag) {
-            console.log('[Cloud Saves Auto] 自动存档条件不满足（未授权/未启用/无目标），跳过。');
-            currentOperation = null;
-            return;
-        }
-        
-        const targetTag = config.autoSaveTargetTag;
-        console.log(`[Cloud Saves Auto] 开始自动覆盖存档到: ${targetTag}`);
-        
-        // --- 复用 /overwrite 接口的核心逻辑 --- 
-        // (注意：这里不处理 res 对象，只执行操作或抛出错误)
-        
-        let originalDescription = `Overwrite of ${targetTag}`;
-        const fetchTagInfoResult = await runGitCommand(`git tag -n1 -l "${targetTag}" --format="%(contents)"`);
-        if (fetchTagInfoResult.success && fetchTagInfoResult.stdout.trim()) {
-            originalDescription = fetchTagInfoResult.stdout.trim().split('\n')[0];
-        }
-        const displayName = config.display_name || config.username || 'Cloud Saves User';
-        const placeholderEmail = 'cloud-saves@sillytavern.local';
-        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
-        const branchToUse = config.branch || DEFAULT_BRANCH;
-
-        const addResult = await runGitCommand('git add -A');
-        if (!addResult.success) throw new Error(`添加到暂存区失败: ${addResult.stderr}`);
-
-        const statusResult = await runGitCommand('git status --porcelain');
-        const hasChanges = statusResult.success && statusResult.stdout.trim() !== '';
-        let newCommitHash = 'HEAD';
-
-        if (hasChanges) {
-            const commitMessage = `Auto Save Overwrite: ${targetTag}`;
-            const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
-            if (!commitResult.success) {
-                if (commitResult.stderr && commitResult.stderr.includes('nothing to commit')) {
-                    console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
-                     const headCommitResult = await runGitCommand('git rev-parse HEAD');
-                     if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-                     newCommitHash = headCommitResult.stdout.trim();
-                } else {
-                    throw new Error(`创建自动存档提交失败: ${commitResult.stderr}`);
-                }
-            } else {
-                 const newCommitResult = await runGitCommand('git rev-parse HEAD');
-                 if (!newCommitResult.success) throw new Error('获取新提交哈希失败');
-                 newCommitHash = newCommitResult.stdout.trim();
-                 console.log('[Cloud Saves Auto] 新自动存档提交哈希:', newCommitHash);
-                 const pushCommitResult = await runGitCommand(`git push origin ${branchToUse}`);
-                 if (!pushCommitResult.success) console.warn(`[Cloud Saves Auto] 推送自动存档提交到分支 ${branchToUse} 失败:`, pushCommitResult.stderr);
-            }
-        } else {
-             console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
-             const headCommitResult = await runGitCommand('git rev-parse HEAD');
-             if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-             newCommitHash = headCommitResult.stdout.trim();
-        }
-
-        await runGitCommand(`git tag -d "${targetTag}"`);
-        const deleteRemoteResult = await runGitCommand(`git push origin :refs/tags/${targetTag}`);
-        if (!deleteRemoteResult.success && !deleteRemoteResult.stderr.includes('remote ref does not exist')) {
-           console.warn(`[Cloud Saves Auto] 删除远程旧标签 ${targetTag} 时遇到问题:`, deleteRemoteResult.stderr);
-        }
-
-        const nowTimestampOverwrite = new Date().toISOString();
-        const fullTagMessageOverwrite = `${originalDescription}\nLast Updated: ${nowTimestampOverwrite}`;
-        const newTagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${targetTag}" -m "${fullTagMessageOverwrite}" ${newCommitHash}`);
-        if (!newTagResult.success) throw new Error(`创建新标签 ${targetTag} 失败: ${newTagResult.stderr}`);
-
-        const pushNewTagResult = await runGitCommand(`git push origin "${targetTag}"`);
-        if (!pushNewTagResult.success) {
-            await runGitCommand(`git tag -d "${targetTag}"`);
-           throw new Error(`推送新标签 ${targetTag} 到远程失败: ${pushNewTagResult.stderr}`);
-        }
-
-        // 不需要更新 last_save，让用户手动操作的 last_save 保持
-        console.log(`[Cloud Saves Auto] 成功自动覆盖存档: ${targetTag}`);
-
-    } catch (error) {
-        console.error(`[Cloud Saves Auto] 自动覆盖存档失败 (${config?.autoSaveTargetTag}):`, error);
-    } finally {
-        currentOperation = null; // 释放操作状态
-    }
-}
-
-// --- 新增：设置/清除后端定时器的函数 ---
-function setupBackendAutoSaveTimer() {
-    if (autoSaveBackendTimer) {
-        console.log('[Cloud Saves] 清除现有的后端自动存档定时器。');
-        clearInterval(autoSaveBackendTimer);
-        autoSaveBackendTimer = null;
-    }
-
-    readConfig().then(config => {
-        if (config.is_authorized && config.autoSaveEnabled && config.autoSaveTargetTag) {
-            const intervalMinutes = config.autoSaveInterval > 0 ? config.autoSaveInterval : 30;
-            const intervalMilliseconds = intervalMinutes * 60 * 1000;
-            console.log(`[Cloud Saves] 启动后端定时存档，间隔 ${intervalMinutes} 分钟，目标: ${config.autoSaveTargetTag}`);
-            autoSaveBackendTimer = setInterval(performAutoSave, intervalMilliseconds);
-        } else {
-            console.log('[Cloud Saves] 后端定时存档未启动（未授权/未启用/无目标）。');
-        }
-    }).catch(err => {
-        console.error('[Cloud Saves] 启动后端定时器前读取配置失败:', err);
-    });
-}
-
 // ========== 插件初始化和导出 ==========
 
 async function init(router) {
@@ -1070,14 +954,9 @@ async function init(router) {
                     currentConfig.autoSaveEnabled = !!autoSaveEnabled;
                 }
                 if (autoSaveInterval !== undefined) {
-                    const interval = parseFloat(autoSaveInterval);
-                    // 验证输入是否为有效正数
-                    if (isNaN(interval) || interval <= 0) {
-                        // 输入无效，返回错误
-                        return res.status(400).json({ success: false, message: '无效的自动存档间隔。请输入一个大于 0 的数字。' });
-                    }
-                    // 输入有效，保存
-                    currentConfig.autoSaveInterval = interval;
+                    const interval = parseInt(autoSaveInterval, 10);
+                    // 确保间隔是正数
+                    currentConfig.autoSaveInterval = interval > 0 ? interval : DEFAULT_CONFIG.autoSaveInterval;
                 }
                 if (autoSaveTargetTag !== undefined) {
                     // 移除可能的空格，但不强制要求标签名格式
@@ -1085,10 +964,6 @@ async function init(router) {
                 }
                 
                 await saveConfig(currentConfig);
-                
-                // --- 新增：保存配置后重新设置后端定时器 ---
-                setupBackendAutoSaveTimer();
-                
                 // 返回更新后的安全配置
                 const safeConfig = {
                     repo_url: currentConfig.repo_url,
@@ -1104,12 +979,11 @@ async function init(router) {
                 };
                 res.json({ success: true, message: '配置保存成功', config: safeConfig });
             } catch (error) {
-                console.error('[cloud-saves] 保存配置失败:', error);
                 res.status(500).json({ success: false, message: '保存配置失败', error: error.message });
             }
         });
 
-        // 授权检查和初始化 - 修改：授权成功后启动后端定时器
+        // 授权检查和初始化 - 修改：接收 branch 参数
         router.post('/authorize', async (req, res) => {
             try {
                 const { branch } = req.body; // 从请求体获取分支
@@ -1224,14 +1098,8 @@ async function init(router) {
                 }
                 
                 await saveConfig(config);
-                
-                // --- 新增：授权成功后启动后端定时器 ---
-                setupBackendAutoSaveTimer();
-                
                 res.json({ success: true, message: '授权和配置成功', config: config });
             } catch (error) {
-                // 授权失败时，确保定时器是停止的
-                setupBackendAutoSaveTimer(); // 调用它会检查 is_authorized=false 并停止定时器
                 res.status(500).json({ success: false, message: '授权过程中发生错误', error: error.message });
             }
         });
@@ -1566,9 +1434,6 @@ async function init(router) {
                 currentOperation = null;
             }
         });
-
-        // --- 新增：插件初始化完成后启动定时器 ---
-        setupBackendAutoSaveTimer();
 
     } catch (error) {
         console.error('[cloud-saves] 初始化失败:', error);
