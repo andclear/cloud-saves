@@ -424,9 +424,8 @@ async function listSaves() {
         currentOperation = 'list_saves';
         console.log('[cloud-saves] 获取存档列表');
         
-        // 修改 fetch 命令，使用精确 refspec
-        const fetchTagsResult = await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags');
-        if (!fetchTagsResult.success) return { success: false, message: '从远程获取标签失败', details: fetchTagsResult };
+        const fetchResult = await runGitCommand('git fetch --tags');
+        if (!fetchResult.success) return { success: false, message: '从远程获取标签失败', details: fetchResult };
 
         // 修改 format，添加 %(taggername) 和 %(contents) 获取完整 tag 消息体
         const formatString = "%(refname:short)%00%(creatordate:iso)%00%(taggername)%00%(subject)%00%(contents)";
@@ -1150,19 +1149,30 @@ async function init(router) {
                     return res.status(500).json({ success: false, message: remoteResult.message, details: remoteResult });
                 }
 
-                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch + 精确 refspec
+                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
                 console.log("[cloud-saves] 检查远程连接并获取标签...");
-                const fetchTagsResultAuth = await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags'); // 使用精确 refspec
-                if (!fetchTagsResultAuth.success) {
+                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
+                if (!fetchTagsResult.success) {
                     await saveConfig(config); // 保存未授权状态
                     // 修改：返回 400 Bad Request 而不是 401
                     return res.status(400).json({ 
                         success: false, 
                         message: '配置错误或权限不足：无法访问远程仓库或获取标签，请检查URL、Token权限和分支名称。', 
-                        details: fetchTagsResultAuth 
+                        details: fetchTagsResult 
                     });
                 }
                 console.log("[cloud-saves] 获取标签成功。");
+                
+                // --- FIX: 明确获取目标分支 --- 
+                console.log(`[cloud-saves] 检查远程连接并获取目标分支 ${targetBranch}...`);
+                const fetchBranchResult = await runGitCommand(`git fetch origin ${targetBranch}`);
+                if (!fetchBranchResult.success) {
+                    // 如果获取特定分支失败（例如远程不存在），这不一定是授权失败，但后续检查会处理
+                    console.warn(`[cloud-saves] 获取远程分支 ${targetBranch} 失败: ${fetchBranchResult.stderr}. 将继续检查分支是否存在。`);
+                    // 不在此处返回错误，让后续的 ls-remote 检查来最终确认
+                } else {
+                     console.log(`[cloud-saves] 获取分支 ${targetBranch} 成功。`);
+                 }
                 
                 // 5. 检查目标分支是否存在于远程 (ls-remote 已经会使用 token)
                 console.log(`[cloud-saves] 检查远程分支 ${targetBranch}...`);
@@ -1215,16 +1225,6 @@ async function init(router) {
                      }
                 }
 
-                // --- FIX: 添加 fetch 命令来获取分支信息 ---
-                console.log(`[cloud-saves] 获取远程分支 ${targetBranch} 的数据...`);
-                const fetchBranchResult = await runGitCommand(`git fetch origin refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`);
-                if (!fetchBranchResult.success) {
-                   // 如果获取分支失败，也算授权失败
-                    await saveConfig(config); 
-                    return res.status(500).json({ success: false, message: `无法获取远程分支 ${targetBranch} 的数据`, details: fetchBranchResult.stderr });
-                }
-                // -------------------------------------------
-
                 // 6. 标记为已授权并保存最终配置
                 config.is_authorized = true;
                 config.branch = targetBranch; // 确认分支已保存
@@ -1274,11 +1274,9 @@ async function init(router) {
             // 确保在获取前拉取最新的标签和分支信息
             const config = await readConfig();
             if (config.is_authorized) {
-                 // 修改 fetch 命令，使用精确 refspec
-                 await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags');
+                 await runGitCommand('git fetch origin --tags');
                  const branch = config.branch || DEFAULT_BRANCH;
-                 // 使用精确 refspec 获取分支
-                 await runGitCommand(`git fetch origin refs/heads/${branch}:refs/remotes/origin/${branch}`);
+                 await runGitCommand(`git fetch origin ${branch}`); // 拉取当前分支的更新
             }
             try {
                 const result = await listSaves();
