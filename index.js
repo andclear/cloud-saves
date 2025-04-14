@@ -163,7 +163,7 @@ async function runGitCommand(command, options = {}) {
         // 处理选项参数
         const execOptions = { 
             cwd: executeIn // 使用确定的执行目录
-        }; 
+        };
         
         // 处理标准输入
         if (options && options.input !== undefined) {
@@ -1395,7 +1395,7 @@ async function init(router) {
             currentOperation = 'overwrite_save'; // 设置操作状态
             try {
                 const { tagName } = req.params;
-                const config = await readConfig();
+        const config = await readConfig();
 
                 if (!config.is_authorized) {
                     return res.status(401).json({ success: false, message: '未授权，请先连接仓库' });
@@ -1506,7 +1506,7 @@ async function init(router) {
                         timestamp: nowTimestampOverwrite, // 使用覆盖操作的时间
                         description: originalDescription // 使用基础描述
                     };
-                    await saveConfig(config);
+                await saveConfig(config);
                 }
 
                 res.json({ success: true, message: '存档覆盖成功' });
@@ -1561,7 +1561,7 @@ async function init(router) {
                         });
                     }
                     console.log('[cloud-saves] 配置远程仓库成功');
-                } else {
+            } else {
                     console.log('[cloud-saves] 未配置仓库 URL，跳过配置远程仓库');
                 }
 
@@ -1636,17 +1636,12 @@ async function init(router) {
                 
                 if (!pullResult.success) {
                     console.error('[cloud-saves] git pull 失败:', pullResult.stderr);
-                     // 检查是否是本地更改冲突
-                     if (pullResult.stderr.includes('Your local changes to the following files would be overwritten')) {
-                         return res.json({ success: false, status: 'pull_failed_local_changes', message: '更新失败：您对插件文件进行了本地修改，请先处理或移除这些修改。' });
-                     } else {
-                         // 修复：确保返回正确的错误信息
-                         return res.json({ 
-                            success: false, 
-                            status: 'pull_failed', 
-                            message: `更新失败：执行 git pull 时出错。错误: ${pullResult.stderr || pullResult.error || '未知错误'}` 
-                        });
-                     }
+                    // 移除对本地修改的特定检查，统一报告 pull 失败
+                    return res.json({ 
+                        success: false, 
+                        status: 'pull_failed', 
+                        message: `更新失败：执行 git pull 时出错。错误: ${pullResult.stderr || pullResult.error || '未知错误'}` 
+                    });
                  }
                 
                 console.log('[cloud-saves] git pull 成功！');
