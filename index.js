@@ -1142,8 +1142,40 @@ async function init(router) {
                 if (!initResult.success) {
                     return res.status(500).json({ success: false, message: initResult.message, details: initResult });
                 }
+                console.log('[cloud-saves] git init 成功');
 
-                // 3. 配置远程仓库 (确保指向正确 URL)
+                // --- 新增：进行初始提交 ---
+                try {
+                    console.log('[cloud-saves] 添加所有文件到初始暂存区...');
+                    const addAllResult = await runGitCommand('git add -A');
+                    if (!addAllResult.success) throw new Error(`添加文件到暂存区失败: ${addAllResult.stderr}`);
+
+                    // 检查是否真的有东西需要提交
+                    const statusResult = await runGitCommand('git status --porcelain');
+                    if (statusResult.success && statusResult.stdout.trim() !== '') {
+                        console.log('[cloud-saves] 执行初始提交...');
+                        const commitMessage = 'Initial commit of existing data directory';
+                        const displayName = config.display_name || config.username || 'Cloud Saves User';
+                        const placeholderEmail = 'cloud-saves@sillytavern.local';
+                        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
+                        const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
+                        // 忽略 "nothing to commit" 错误，但也检查其他错误
+                        if (!commitResult.success && !commitResult.stderr.includes('nothing to commit')) {
+                            throw new Error(`初始提交失败: ${commitResult.stderr}`);
+                        }
+                        console.log('[cloud-saves] 初始提交完成。');
+                    } else {
+                        console.log('[cloud-saves] data 目录为空或无更改，跳过初始提交。');
+                    }
+                } catch (initialCommitError) {
+                     console.error('[cloud-saves] 执行初始提交时出错:', initialCommitError);
+                     // 即使初始提交失败，也可能继续配置远程，让用户后续处理？或者直接报错？
+                     // 暂时选择报错，因为后续操作很可能失败
+                     return res.status(500).json({ success: false, message: `创建初始提交失败: ${initialCommitError.message}` });
+                 }
+                // --- 初始提交结束 ---
+
+                // 3. 配置远程仓库 (如果 URL 已配置)
                 const remoteResult = await configureRemote(config.repo_url);
                 if (!remoteResult.success) {
                     return res.status(500).json({ success: false, message: remoteResult.message, details: remoteResult });
@@ -1541,11 +1573,42 @@ async function init(router) {
                 }
 
                 // 1. 执行 git init
-                const initResult = await initGitRepo(); // 这个函数内部会处理已存在的情况，但我们上面强制删除了
+                const initResult = await initGitRepo(); 
                 if (!initResult.success) {
                     return res.status(500).json({ success: false, message: `初始化Git仓库失败: ${initResult.message}`, details: initResult });
                 }
                 console.log('[cloud-saves] git init 成功');
+
+                // --- 新增：进行初始提交 ---
+                try {
+                    console.log('[cloud-saves] 添加所有文件到初始暂存区...');
+                    const addAllResult = await runGitCommand('git add -A');
+                    if (!addAllResult.success) throw new Error(`添加文件到暂存区失败: ${addAllResult.stderr}`);
+
+                    // 检查是否真的有东西需要提交
+                    const statusResult = await runGitCommand('git status --porcelain');
+                    if (statusResult.success && statusResult.stdout.trim() !== '') {
+                        console.log('[cloud-saves] 执行初始提交...');
+                        const commitMessage = 'Initial commit of existing data directory';
+                        const displayName = config.display_name || config.username || 'Cloud Saves User';
+                        const placeholderEmail = 'cloud-saves@sillytavern.local';
+                        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
+                        const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
+                        // 忽略 "nothing to commit" 错误，但也检查其他错误
+                        if (!commitResult.success && !commitResult.stderr.includes('nothing to commit')) {
+                            throw new Error(`初始提交失败: ${commitResult.stderr}`);
+                        }
+                        console.log('[cloud-saves] 初始提交完成。');
+                    } else {
+                        console.log('[cloud-saves] data 目录为空或无更改，跳过初始提交。');
+                    }
+                } catch (initialCommitError) {
+                     console.error('[cloud-saves] 执行初始提交时出错:', initialCommitError);
+                     // 即使初始提交失败，也可能继续配置远程，让用户后续处理？或者直接报错？
+                     // 暂时选择报错，因为后续操作很可能失败
+                     return res.status(500).json({ success: false, message: `创建初始提交失败: ${initialCommitError.message}` });
+                 }
+                // --- 初始提交结束 ---
 
                 // 2. 配置远程仓库 (如果 URL 已配置)
                 if (config.repo_url) {
