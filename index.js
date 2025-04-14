@@ -1570,6 +1570,84 @@ async function init(router) {
         // --- 新增：插件初始化完成后启动定时器 ---
         setupBackendAutoSaveTimer();
 
+        // --- 新增：检查并拉取更新接口 ---
+        router.post('/update/check-and-pull', async (req, res) => {
+            if (currentOperation) {
+                return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
+            }
+            currentOperation = 'check_update';
+            const pluginDir = __dirname; // 插件的根目录
+            let updateResult = { success: false, status: 'error', message: '检查更新时发生未知错误。' };
+
+            try {
+                console.log(`[Cloud Saves Update] 开始检查更新，插件目录: ${pluginDir}`);
+
+                // 1. 检查插件目录是否为 Git 仓库
+                const isRepoResult = await runGitCommand('git rev-parse --is-inside-work-tree', { cwd: pluginDir });
+                if (!isRepoResult.success || isRepoResult.stdout.trim() !== 'true') {
+                    console.warn('[Cloud Saves Update] 插件目录不是有效的 Git 仓库。');
+                    updateResult = { success: false, status: 'not-git-repo', message: '无法更新：插件似乎不是通过 Git 安装的。' };
+                    return res.json(updateResult);
+                }
+                console.log('[Cloud Saves Update] 插件目录是 Git 仓库。');
+
+                // 2. 获取远程 HEAD commit (简单起见，直接用 ls-remote HEAD)
+                // 注意：这里假设 origin 指向正确的仓库
+                console.log('[Cloud Saves Update] 获取远程最新 commit...');
+                const remoteResult = await runGitCommand('git ls-remote origin HEAD', { cwd: pluginDir });
+                if (!remoteResult.success || !remoteResult.stdout) {
+                    console.error('[Cloud Saves Update] 获取远程 commit 失败:', remoteResult.stderr);
+                    throw new Error(`获取远程版本信息失败: ${remoteResult.stderr}`);
+                }
+                const remoteCommit = remoteResult.stdout.split('\t')[0];
+                console.log(`[Cloud Saves Update] 远程最新 commit: ${remoteCommit}`);
+
+                // 3. 获取本地 HEAD commit
+                console.log('[Cloud Saves Update] 获取本地 commit...');
+                const localResult = await runGitCommand('git rev-parse HEAD', { cwd: pluginDir });
+                if (!localResult.success || !localResult.stdout) {
+                     console.error('[Cloud Saves Update] 获取本地 commit 失败:', localResult.stderr);
+                    throw new Error(`获取本地版本信息失败: ${localResult.stderr}`);
+                }
+                const localCommit = localResult.stdout.trim();
+                console.log(`[Cloud Saves Update] 本地 commit: ${localCommit}`);
+
+                // 4. 比较版本
+                if (remoteCommit === localCommit) {
+                    console.log('[Cloud Saves Update] 本地已是最新版本。');
+                    updateResult = { success: true, status: 'up-to-date', message: '插件已是最新版本。' };
+                } else {
+                    console.log('[Cloud Saves Update] 检测到新版本，尝试拉取更新...');
+                    // 5. 执行更新 (git pull)
+                    const pullResult = await runGitCommand('git pull origin main', { cwd: pluginDir }); // 假设更新来自 main 分支
+                    if (!pullResult.success) {
+                        console.error('[Cloud Saves Update] git pull 失败:', pullResult.stderr);
+                         // 检查是否是冲突错误
+                         if (pullResult.stderr.toLowerCase().includes('conflict')) {
+                             throw new Error(`更新失败：检测到文件冲突，请手动解决冲突或重新克隆插件。 Stderr: ${pullResult.stderr}`);
+                         } else if (pullResult.stderr.toLowerCase().includes('please commit your changes or stash them')) {
+                            throw new Error(`更新失败：您有未提交的本地更改，请先提交或储藏。 Stderr: ${pullResult.stderr}`);
+                         } else {
+                            throw new Error(`更新失败: ${pullResult.stderr}`);
+                         }
+                    }
+                    console.log('[Cloud Saves Update] git pull 成功。');
+                    updateResult = { success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' };
+                }
+
+                res.json(updateResult);
+
+            } catch (error) {
+                console.error('[Cloud Saves Update] 检查/更新过程中出错:', error);
+                updateResult.message = `检查/更新过程中出错: ${error.message}`;
+                res.status(500).json(updateResult);
+            } finally {
+                currentOperation = null;
+            }
+        });
+
+        // --- 初始化逻辑 --- (检查配置，连接远程等)
+
     } catch (error) {
         console.error('[cloud-saves] 初始化失败:', error);
     }

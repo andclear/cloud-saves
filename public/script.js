@@ -64,6 +64,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const autoSaveIntervalInput = document.getElementById('auto-save-interval');
     const autoSaveTargetTagInput = document.getElementById('auto-save-target-tag');
     const saveAutoSaveSettingsBtn = document.getElementById('save-auto-save-settings-btn');
+    const checkUpdateBtn = document.getElementById('check-update-btn'); // 新增
 
     // API调用工具函数
     async function apiCall(endpoint, method = 'GET', data = null) {
@@ -1048,6 +1049,7 @@ document.addEventListener('DOMContentLoaded', function() {
         autoSaveOptionsDiv.style.display = autoSaveEnabledSwitch.checked ? 'flex' : 'none';
     }, 'auto-save-enabled');
     safeAddEventListener(saveAutoSaveSettingsBtn, 'click', saveAutoSaveConfiguration, 'save-auto-save-settings-btn');
+    safeAddEventListener(checkUpdateBtn, 'click', checkAndPullUpdate, 'check-update-btn'); // 新增
 
     // --- 新增：初始化仓库函数 ---
     async function initializeRepository() {
@@ -1073,6 +1075,32 @@ document.addEventListener('DOMContentLoaded', function() {
             hideLoading();
             console.error('初始化仓库失败:', error);
             showToast('错误', `初始化仓库失败: ${error.message}`, 'error');
+        }
+    }
+
+    // --- 新增：检查并执行更新函数 ---
+    async function checkAndPullUpdate() {
+        try {
+            showLoading('正在检查更新...');
+            const result = await apiCall('update/check-and-pull', 'POST');
+            hideLoading();
+
+            if (result.status === 'not-git-repo') {
+                showToast('提示', result.message, 'warning');
+            } else if (result.status === 'up-to-date') {
+                showToast('信息', result.message, 'info');
+            } else if (result.status === 'updated') {
+                showToast('成功', result.message, 'success'); 
+                // 可以在这里添加一个更醒目的提示，要求重启
+            } else {
+                // 其他错误情况
+                throw new Error(result.message || '检查更新失败');
+            }
+
+        } catch (error) {
+            hideLoading();
+            console.error('检查或执行更新失败:', error);
+            showToast('错误', `检查或执行更新失败: ${error.message}`, 'error');
         }
     }
 
