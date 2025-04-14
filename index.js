@@ -1150,8 +1150,9 @@ async function init(router) {
                 }
 
                 // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
-                console.log("[cloud-saves] 检查远程连接并获取标签...");
-                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
+                console.log("[cloud-saves] 检查远程连接并获取标签 (使用精确 refspec)...");
+                // 修改：使用精确的 refspec 只获取标签
+                const fetchTagsResult = await runGitCommand('git fetch origin refs/tags/*:refs/tags/* --prune-tags'); 
                 if (!fetchTagsResult.success) {
                     await saveConfig(config); // 保存未授权状态
                     // 修改：返回 400 Bad Request 而不是 401
