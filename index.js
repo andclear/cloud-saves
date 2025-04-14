@@ -1600,9 +1600,17 @@ async function init(router) {
 
                 // 2. 检查远程地址是否匹配
                 const remoteUrlResult = await runGitCommand('git remote get-url origin', { cwd: pluginDir });
-                if (!remoteUrlResult.success || remoteUrlResult.stdout.trim() !== targetRemote) {
-                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${remoteUrlResult.stdout.trim()}) 与目标 (${targetRemote}) 不匹配，无法安全更新。`);
-                     return res.json({ success: false, status: 'wrong_remote', message: `无法更新：插件远程地址 (${remoteUrlResult.stdout.trim() || '未设置'}) 与预期 (${targetRemote}) 不符。` });
+                const localRemoteUrl = remoteUrlResult.success ? remoteUrlResult.stdout.trim() : '';
+                const targetRemoteWithoutGit = targetRemote.replace('.git', '');
+                
+                // 允许匹配带 .git 或不带 .git 的 URL
+                if (!localRemoteUrl || (localRemoteUrl !== targetRemote && localRemoteUrl !== targetRemoteWithoutGit)) {
+                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${localRemoteUrl || '未获取到'}) 与目标 (${targetRemote} 或 ${targetRemoteWithoutGit}) 不匹配，无法安全更新。`);
+                    return res.json({ 
+                        success: false, 
+                        status: 'wrong_remote', 
+                        message: `无法更新：插件远程地址 (${localRemoteUrl || '未设置'}) 与预期 (${targetRemote}) 不符。请确保插件是从官方地址克隆的。` 
+                    });
                  }
 
                 // 3. 获取本地 HEAD 哈希
