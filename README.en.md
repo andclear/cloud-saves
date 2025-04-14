@@ -19,7 +19,6 @@ With Cloud Saves, you can:
 *   **🏷️ Clear Management**: Conveniently create, name, view, rename, and delete your cloud saves.
 *   **⏱️ Automatic Saves**: Set up scheduled tasks to automatically back up your latest state.
 
-**(It's recommended to add some screenshots of the plugin interface here to demonstrate the configuration and usage process)**
 
 ## ✨ Key Features:
 
