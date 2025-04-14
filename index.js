@@ -77,6 +77,7 @@ const DEFAULT_CONFIG = {
 
 // 当前操作状态
 let currentOperation = null;
+let autoSaveBackendTimer = null; // 后端定时器ID
 
 // ========== 配置管理 ==========
 
@@ -114,33 +115,41 @@ async function saveConfig(config) {
 
 // ========== Git 操作核心功能 ==========
 
-// 执行git命令
+// 执行git命令 - 修改：增加可选的 cwd 参数
 async function runGitCommand(command, options = {}) {
     let config = {};
     let originalRepoUrl = '';
     let tokenUrl = '';
     let temporarilySetUrl = false;
+    const executeIn = options.cwd || DATA_DIR; // 优先使用传入的 cwd，否则默认 DATA_DIR
 
     try {
         config = await readConfig();
         const token = config.github_token;
-        originalRepoUrl = config.repo_url;
-
-        // 特殊处理推送/拉取/获取/列出远程引用时使用token
-        if (token && originalRepoUrl && originalRepoUrl.startsWith('https://') && 
-            (command.startsWith('git push') || command.startsWith('git pull') || command.startsWith('git fetch') || command.startsWith('git ls-remote'))) {
+        // 读取指定目录下的远程 URL
+        let remoteShowResult;
+        try {
+            remoteShowResult = await execPromise('git remote get-url origin', { cwd: executeIn });
+            originalRepoUrl = remoteShowResult.stdout.trim();
+        } catch (getRemoteError) {
+            // 如果获取远程URL失败（例如还没设置远程），则 originalRepoUrl 保持空
+             console.warn(`[cloud-saves] 在目录 ${executeIn} 获取 remote URL 失败:`, getRemoteError.stderr || getRemoteError.message);
+             originalRepoUrl = ''; // 确保为空
+        }
+        
+        // 特殊处理推送/拉取/获取/列出远程引用时使用token (只在 DATA_DIR 中执行时才用 token)
+        if (executeIn === DATA_DIR && token && originalRepoUrl && originalRepoUrl.startsWith('https://') && 
+            (command.startsWith('git push') || command.startsWith('git pull') || command.startsWith('git fetch') || command.startsWith('git ls-remote'))) { 
             if (!originalRepoUrl.includes('@github.com')) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                
-                console.log(`[cloud-saves] 临时设置带token的remote URL，执行命令: ${command}`);
-                const setUrlResult = await execPromise(`git remote set-url origin ${tokenUrl}`, { cwd: DATA_DIR });
-                console.log('[cloud-saves] set-url (with token) stdout:', setUrlResult.stdout);
-                console.log('[cloud-saves] set-url (with token) stderr:', setUrlResult.stderr);
+                console.log(`[cloud-saves] DATA_DIR: 临时设置带token的remote URL，执行命令: ${command}`);
+                // 注意：这里的 set-url 仍然是在 DATA_DIR 操作
+                await execPromise(`git remote set-url origin ${tokenUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = true;
             }
         }
 
-        // 对clone命令也要修改URL
+        // 对clone命令也要修改URL (通常不在插件目录执行)
         if (token && originalRepoUrl && originalRepoUrl.startsWith('https://') && command.startsWith('git clone')) {
             if (!originalRepoUrl.includes('@github.com')) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
@@ -148,12 +157,12 @@ async function runGitCommand(command, options = {}) {
             }
         }
 
-        // 记录要执行的命令
-        console.log(`[cloud-saves] 执行命令: ${command}`);
+        // 记录要执行的命令和目录
+        console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${command}`);
 
         // 处理选项参数
         const execOptions = { 
-            cwd: options.cwd || DATA_DIR 
+            cwd: executeIn // 使用确定的执行目录
         };
         
         // 处理标准输入
@@ -199,9 +208,9 @@ async function runGitCommand(command, options = {}) {
             // 常规命令执行
             const { stdout, stderr } = await execPromise(command, execOptions);
             
-            // 如果临时设置了URL，命令完成后恢复
-            if (temporarilySetUrl) {
-                console.log(`[cloud-saves] 恢复原始remote URL: ${originalRepoUrl}`);
+            // 如果临时设置了URL，命令完成后恢复 (只针对 DATA_DIR)
+            if (temporarilySetUrl && executeIn === DATA_DIR) {
+                console.log(`[cloud-saves] DATA_DIR: 恢复原始remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = false;
             }
@@ -215,16 +224,16 @@ async function runGitCommand(command, options = {}) {
         if (command.startsWith('git diff --binary')) {
             stdoutLog = '[二进制差异内容已省略]';
         }
-        console.error(`Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
+        console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
         
-        // 如果临时设置了URL且命令失败，尝试恢复
-        if (temporarilySetUrl) {
+        // 如果临时设置了URL且命令失败，尝试恢复 (只针对 DATA_DIR)
+        if (temporarilySetUrl && executeIn === DATA_DIR) {
             try {
-                console.warn(`[cloud-saves] 命令失败，尝试恢复原始remote URL: ${originalRepoUrl}`);
+                console.warn(`[cloud-saves] DATA_DIR: 命令失败，尝试恢复原始remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
                 temporarilySetUrl = false;
             } catch (revertError) {
-                console.error(`[cloud-saves] 恢复remote URL失败: ${revertError.message}`);
+                console.error(`[cloud-saves] DATA_DIR: 恢复remote URL失败: ${revertError.message}`);
             }
         }
 
@@ -235,13 +244,13 @@ async function runGitCommand(command, options = {}) {
             stderr: error.stderr || ''
         };
     } finally {
-        // 最终安全检查：确保URL被恢复
-        if (temporarilySetUrl) {
+        // 最终安全检查：确保URL被恢复 (只针对 DATA_DIR)
+        if (temporarilySetUrl && executeIn === DATA_DIR) {
             try {
-                console.warn(`[cloud-saves] 最终检查：在finally块中恢复remote URL: ${originalRepoUrl}`);
+                console.warn(`[cloud-saves] DATA_DIR: 最终检查：在finally块中恢复remote URL: ${originalRepoUrl}`);
                 await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
             } catch (finalRevertError) {
-                console.error(`[cloud-saves] 在finally块中恢复remote URL失败: ${finalRevertError.message}`);
+                console.error(`[cloud-saves] DATA_DIR: 在finally块中恢复remote URL失败: ${finalRevertError.message}`);
             }
         }
     }
@@ -883,6 +892,121 @@ async function discardTempStash() {
     return { success: true, message: 'Temporary stash discarded' };
 }
 
+// --- 新增：执行自动覆盖存档的函数 (供定时器调用) ---
+async function performAutoSave() {
+    if (currentOperation) {
+        console.log(`[Cloud Saves Auto] 跳过自动存档，当前有操作正在进行: ${currentOperation}`);
+        return;
+    }
+    currentOperation = 'auto_save'; // 标记操作开始
+    let config;
+    try {
+        config = await readConfig();
+        if (!config.is_authorized || !config.autoSaveEnabled || !config.autoSaveTargetTag) {
+            console.log('[Cloud Saves Auto] 自动存档条件不满足（未授权/未启用/无目标），跳过。');
+            currentOperation = null;
+            return;
+        }
+        
+        const targetTag = config.autoSaveTargetTag;
+        console.log(`[Cloud Saves Auto] 开始自动覆盖存档到: ${targetTag}`);
+        
+        // --- 复用 /overwrite 接口的核心逻辑 --- 
+        // (注意：这里不处理 res 对象，只执行操作或抛出错误)
+        
+        let originalDescription = `Overwrite of ${targetTag}`;
+        const fetchTagInfoResult = await runGitCommand(`git tag -n1 -l "${targetTag}" --format="%(contents)"`);
+        if (fetchTagInfoResult.success && fetchTagInfoResult.stdout.trim()) {
+            originalDescription = fetchTagInfoResult.stdout.trim().split('\n')[0];
+        }
+        const displayName = config.display_name || config.username || 'Cloud Saves User';
+        const placeholderEmail = 'cloud-saves@sillytavern.local';
+        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
+        const branchToUse = config.branch || DEFAULT_BRANCH;
+
+        const addResult = await runGitCommand('git add -A');
+        if (!addResult.success) throw new Error(`添加到暂存区失败: ${addResult.stderr}`);
+
+        const statusResult = await runGitCommand('git status --porcelain');
+        const hasChanges = statusResult.success && statusResult.stdout.trim() !== '';
+        let newCommitHash = 'HEAD';
+
+        if (hasChanges) {
+            const commitMessage = `Auto Save Overwrite: ${targetTag}`;
+            const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
+            if (!commitResult.success) {
+                if (commitResult.stderr && commitResult.stderr.includes('nothing to commit')) {
+                    console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
+                     const headCommitResult = await runGitCommand('git rev-parse HEAD');
+                     if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
+                     newCommitHash = headCommitResult.stdout.trim();
+                } else {
+                    throw new Error(`创建自动存档提交失败: ${commitResult.stderr}`);
+                }
+            } else {
+                 const newCommitResult = await runGitCommand('git rev-parse HEAD');
+                 if (!newCommitResult.success) throw new Error('获取新提交哈希失败');
+                 newCommitHash = newCommitResult.stdout.trim();
+                 console.log('[Cloud Saves Auto] 新自动存档提交哈希:', newCommitHash);
+                 const pushCommitResult = await runGitCommand(`git push origin ${branchToUse}`);
+                 if (!pushCommitResult.success) console.warn(`[Cloud Saves Auto] 推送自动存档提交到分支 ${branchToUse} 失败:`, pushCommitResult.stderr);
+            }
+        } else {
+             console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
+             const headCommitResult = await runGitCommand('git rev-parse HEAD');
+             if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
+             newCommitHash = headCommitResult.stdout.trim();
+        }
+
+        await runGitCommand(`git tag -d "${targetTag}"`);
+        const deleteRemoteResult = await runGitCommand(`git push origin :refs/tags/${targetTag}`);
+        if (!deleteRemoteResult.success && !deleteRemoteResult.stderr.includes('remote ref does not exist')) {
+           console.warn(`[Cloud Saves Auto] 删除远程旧标签 ${targetTag} 时遇到问题:`, deleteRemoteResult.stderr);
+        }
+
+        const nowTimestampOverwrite = new Date().toISOString();
+        const fullTagMessageOverwrite = `${originalDescription}\nLast Updated: ${nowTimestampOverwrite}`;
+        const newTagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${targetTag}" -m "${fullTagMessageOverwrite}" ${newCommitHash}`);
+        if (!newTagResult.success) throw new Error(`创建新标签 ${targetTag} 失败: ${newTagResult.stderr}`);
+
+        const pushNewTagResult = await runGitCommand(`git push origin "${targetTag}"`);
+        if (!pushNewTagResult.success) {
+            await runGitCommand(`git tag -d "${targetTag}"`);
+           throw new Error(`推送新标签 ${targetTag} 到远程失败: ${pushNewTagResult.stderr}`);
+        }
+
+        // 不需要更新 last_save，让用户手动操作的 last_save 保持
+        console.log(`[Cloud Saves Auto] 成功自动覆盖存档: ${targetTag}`);
+
+    } catch (error) {
+        console.error(`[Cloud Saves Auto] 自动覆盖存档失败 (${config?.autoSaveTargetTag}):`, error);
+    } finally {
+        currentOperation = null; // 释放操作状态
+    }
+}
+
+// --- 新增：设置/清除后端定时器的函数 ---
+function setupBackendAutoSaveTimer() {
+    if (autoSaveBackendTimer) {
+        console.log('[Cloud Saves] 清除现有的后端自动存档定时器。');
+        clearInterval(autoSaveBackendTimer);
+        autoSaveBackendTimer = null;
+    }
+
+    readConfig().then(config => {
+        if (config.is_authorized && config.autoSaveEnabled && config.autoSaveTargetTag) {
+            const intervalMinutes = config.autoSaveInterval > 0 ? config.autoSaveInterval : 30;
+            const intervalMilliseconds = intervalMinutes * 60 * 1000;
+            console.log(`[Cloud Saves] 启动后端定时存档，间隔 ${intervalMinutes} 分钟，目标: ${config.autoSaveTargetTag}`);
+            autoSaveBackendTimer = setInterval(performAutoSave, intervalMilliseconds);
+        } else {
+            console.log('[Cloud Saves] 后端定时存档未启动（未授权/未启用/无目标）。');
+        }
+    }).catch(err => {
+        console.error('[Cloud Saves] 启动后端定时器前读取配置失败:', err);
+    });
+}
+
 // ========== 插件初始化和导出 ==========
 
 async function init(router) {
@@ -954,9 +1078,14 @@ async function init(router) {
                     currentConfig.autoSaveEnabled = !!autoSaveEnabled;
                 }
                 if (autoSaveInterval !== undefined) {
-                    const interval = parseInt(autoSaveInterval, 10);
-                    // 确保间隔是正数
-                    currentConfig.autoSaveInterval = interval > 0 ? interval : DEFAULT_CONFIG.autoSaveInterval;
+                    const interval = parseFloat(autoSaveInterval);
+                    // 验证输入是否为有效正数
+                    if (isNaN(interval) || interval <= 0) {
+                        // 输入无效，返回错误
+                        return res.status(400).json({ success: false, message: '无效的自动存档间隔。请输入一个大于 0 的数字。' });
+                    }
+                    // 输入有效，保存
+                    currentConfig.autoSaveInterval = interval;
                 }
                 if (autoSaveTargetTag !== undefined) {
                     // 移除可能的空格，但不强制要求标签名格式
@@ -964,6 +1093,10 @@ async function init(router) {
                 }
                 
                 await saveConfig(currentConfig);
+                
+                // --- 新增：保存配置后重新设置后端定时器 ---
+                setupBackendAutoSaveTimer();
+                
                 // 返回更新后的安全配置
                 const safeConfig = {
                     repo_url: currentConfig.repo_url,
@@ -979,11 +1112,12 @@ async function init(router) {
                 };
                 res.json({ success: true, message: '配置保存成功', config: safeConfig });
             } catch (error) {
+                console.error('[cloud-saves] 保存配置失败:', error);
                 res.status(500).json({ success: false, message: '保存配置失败', error: error.message });
             }
         });
 
-        // 授权检查和初始化 - 修改：接收 branch 参数
+        // 授权检查和初始化 - 修改：授权成功后启动后端定时器
         router.post('/authorize', async (req, res) => {
             try {
                 const { branch } = req.body; // 从请求体获取分支
@@ -1098,8 +1232,14 @@ async function init(router) {
                 }
                 
                 await saveConfig(config);
+                
+                // --- 新增：授权成功后启动后端定时器 ---
+                setupBackendAutoSaveTimer();
+                
                 res.json({ success: true, message: '授权和配置成功', config: config });
             } catch (error) {
+                // 授权失败时，确保定时器是停止的
+                setupBackendAutoSaveTimer(); // 调用它会检查 is_authorized=false 并停止定时器
                 res.status(500).json({ success: false, message: '授权过程中发生错误', error: error.message });
             }
         });
@@ -1255,7 +1395,7 @@ async function init(router) {
             currentOperation = 'overwrite_save'; // 设置操作状态
             try {
                 const { tagName } = req.params;
-                const config = await readConfig();
+        const config = await readConfig();
 
                 if (!config.is_authorized) {
                     return res.status(401).json({ success: false, message: '未授权，请先连接仓库' });
@@ -1366,7 +1506,7 @@ async function init(router) {
                         timestamp: nowTimestampOverwrite, // 使用覆盖操作的时间
                         description: originalDescription // 使用基础描述
                     };
-                    await saveConfig(config);
+                await saveConfig(config);
                 }
 
                 res.json({ success: true, message: '存档覆盖成功' });
@@ -1421,7 +1561,7 @@ async function init(router) {
                         });
                     }
                     console.log('[cloud-saves] 配置远程仓库成功');
-                } else {
+            } else {
                     console.log('[cloud-saves] 未配置仓库 URL，跳过配置远程仓库');
                 }
 
@@ -1434,6 +1574,97 @@ async function init(router) {
                 currentOperation = null;
             }
         });
+
+        // --- 新增：插件初始化完成后启动定时器 ---
+        setupBackendAutoSaveTimer();
+
+        // --- 新增：检查和执行更新接口 ---
+        router.post('/update/check-and-pull', async (req, res) => {
+            if (currentOperation) {
+                return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
+            }
+            currentOperation = 'check_update';
+            const pluginDir = __dirname; // 插件目录
+            const targetRemote = 'https://github.com/fuwei99/cloud-saves.git'; // 目标更新源
+            const targetBranch = 'main';
+
+            try {
+                console.log('[cloud-saves] 开始检查更新...');
+
+                // 1. 检查插件目录是否为 Git 仓库
+                const isRepoResult = await runGitCommand('git rev-parse --is-inside-work-tree', { cwd: pluginDir });
+                if (!isRepoResult.success || isRepoResult.stdout.trim() !== 'true') {
+                    console.warn('[cloud-saves] 插件目录不是有效的 Git 仓库，无法自动更新。');
+                    return res.json({ success: true, status: 'not_git_repo', message: '无法自动更新：插件似乎不是通过 Git 安装的。' });
+                }
+
+                // 2. 检查远程地址是否匹配
+                const remoteUrlResult = await runGitCommand('git remote get-url origin', { cwd: pluginDir });
+                const localRemoteUrl = remoteUrlResult.success ? remoteUrlResult.stdout.trim() : '';
+                const targetRemoteWithoutGit = targetRemote.replace('.git', '');
+                
+                // 允许匹配带 .git 或不带 .git 的 URL
+                if (!localRemoteUrl || (localRemoteUrl !== targetRemote && localRemoteUrl !== targetRemoteWithoutGit)) {
+                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${localRemoteUrl || '未获取到'}) 与目标 (${targetRemote} 或 ${targetRemoteWithoutGit}) 不匹配，无法安全更新。`);
+                    return res.json({ 
+                        success: false, 
+                        status: 'wrong_remote', 
+                        message: `无法更新：插件远程地址 (${localRemoteUrl || '未设置'}) 与预期 (${targetRemote}) 不符。请确保插件是从官方地址克隆的。` 
+                    });
+                 }
+
+                // 3. 获取本地 HEAD 哈希
+                const localHeadResult = await runGitCommand('git rev-parse HEAD', { cwd: pluginDir });
+                if (!localHeadResult.success) {
+                    throw new Error('无法获取本地版本信息。');
+                }
+                const localHash = localHeadResult.stdout.trim();
+                console.log(`[cloud-saves] 本地版本: ${localHash}`);
+
+                // 4. 获取远程 HEAD 哈希
+                console.log(`[cloud-saves] 获取远程 ${targetBranch} 分支版本...`);
+                // 注意：ls-remote 不需要 token，因为是公共仓库
+                const remoteHeadResult = await runGitCommand(`git ls-remote origin refs/heads/${targetBranch}`, { cwd: pluginDir });
+                if (!remoteHeadResult.success || !remoteHeadResult.stdout.trim()) {
+                     throw new Error(`无法获取远程 ${targetBranch} 分支版本信息。`);
+                 }
+                 // 修复：正确分割并获取哈希
+                const remoteHash = remoteHeadResult.stdout.trim().split(/\s+/)[0]; // 使用正则表达式分割空白
+                console.log(`[cloud-saves] 远程版本: ${remoteHash}`);
+
+                // 5. 比较哈希
+                if (localHash === remoteHash) {
+                    console.log('[cloud-saves] 当前已是最新版本。');
+                    return res.json({ success: true, status: 'latest', message: '已是最新版本。' });
+                }
+
+                // 6. 执行更新 (git pull)
+                console.log('[cloud-saves] 检测到新版本，尝试执行 git pull...');
+                const pullResult = await runGitCommand(`git pull origin ${targetBranch}`, { cwd: pluginDir });
+                
+                if (!pullResult.success) {
+                    console.error('[cloud-saves] git pull 失败:', pullResult.stderr);
+                    // 移除对本地修改的特定检查，统一报告 pull 失败
+                    return res.json({ 
+                        success: false, 
+                        status: 'pull_failed', 
+                        message: `更新失败：执行 git pull 时出错。错误: ${pullResult.stderr || pullResult.error || '未知错误'}` 
+                    });
+                 }
+                
+                console.log('[cloud-saves] git pull 成功！');
+                return res.json({ success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' });
+
+            } catch (error) {
+                console.error('[cloud-saves] 检查或执行更新时出错:', error);
+                res.status(500).json({ success: false, status:'error', message: `检查更新时发生内部错误: ${error.message}` });
+            } finally {
+                currentOperation = null;
+            }
+        });
+        
+        // --- 初始化逻辑 --- (检查配置，连接远程等) - 修改：初始化后启动后端定时器
+        const config = await readConfig();
 
     } catch (error) {
         console.error('[cloud-saves] 初始化失败:', error);
