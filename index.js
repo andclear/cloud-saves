@@ -348,7 +348,8 @@ async function initGitRepo() {
         try {
             const gitignorePath = path.join(DATA_DIR, '.gitignore');
             // New content: Un-ignore everything, then specifically ignore the listed folders
-            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n!*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n"; // Removed _webpack/
+            // 移除对 _uploads/, _cache/, _storage/, _webpack/ 的忽略
+            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n!\n"; 
             // Check if it already exists, create if not
             try {
                 await fs.access(gitignorePath);
