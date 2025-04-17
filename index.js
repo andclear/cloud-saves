@@ -314,6 +314,27 @@ async function initGitRepo() {
         console.log('[cloud-saves] git init stdout:', stdout);
         console.log('[cloud-saves] git init stderr:', stderr);
         initResult = { success: true, stdout, stderr, message: 'Git仓库初始化成功' };
+        
+        // --- BEGIN: Create .gitignore in data directory after init ---
+        try {
+            const gitignorePath = path.join(DATA_DIR, '.gitignore');
+            // New content: Un-ignore everything, then specifically ignore the listed folders
+            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n!*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n";
+            // Check if it already exists, create if not
+            try {
+                await fs.access(gitignorePath);
+                console.log(`[cloud-saves] ${gitignorePath} 文件已存在，跳过创建。`);
+            } catch (accessError) {
+                // File does not exist, create it
+                await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
+                console.log(`[cloud-saves] 已成功创建 ${gitignorePath}`);
+            }
+        } catch (gitignoreError) {
+            console.error(`[cloud-saves] 创建 ${path.join(DATA_DIR, '.gitignore')} 文件失败:`, gitignoreError);
+            // Do not fail the whole init process for this, just log the error
+        }
+        // --- END: Create .gitignore in data directory after init ---
+        
     } catch (error) {
         console.error(`[cloud-saves] 在${DATA_DIR}初始化git失败. 错误: ${error.message}`);
         console.error('[cloud-saves] git init stdout on error:', error.stdout);
