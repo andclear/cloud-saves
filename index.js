@@ -1281,28 +1281,48 @@ async function init(router) {
                         return res.status(500).json({ success: false, message: `无法自动创建或同步远程分支 ${targetBranch}。错误：${createBranchError.message}`, details: createBranchError.message });
                     }
                 } else {
-                    console.log(`[cloud-saves] 本地记录中远程分支 ${targetBranch} 已存在`);
-                     // 如果远程分支存在，确保本地也存在并跟踪它
-                     // 首先检查本地分支是否已存在
-                     const checkLocalBranchResult = await runGitCommand(`git show-ref --verify --quiet refs/heads/${targetBranch}`);
-                     if (!checkLocalBranchResult.success) {
-                         // 本地分支不存在，创建跟踪分支
-                         console.log(`[cloud-saves] 本地分支 ${targetBranch} 不存在，创建跟踪分支...`);
-                         const trackResult = await runGitCommand(`git branch --track ${targetBranch} origin/${targetBranch}`);
-                         // 改进：检查更具体的错误消息
-                         if (!trackResult.success && !trackResult.stderr.toLowerCase().includes('already exists')) {
-                              console.warn(`[cloud-saves] 设置本地分支跟踪远程分支时出错: ${trackResult.stderr}`);
-                         }
-                     } else {
-                         console.log(`[cloud-saves] 本地分支 ${targetBranch} 已存在，跳过创建跟踪分支`);
+                    console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在，确保本地同步并切换...`);
+                    // 先 fetch origin 获取所有远程分支的最新信息
+                    console.log(`[cloud-saves] 执行 fetch origin 获取所有远程分支的最新信息...`);
+                    const fetchAllResult = await runGitCommand(`git fetch origin`);
+                    // --- BEGIN: Add detailed logging after fetch ---
+                    console.log(`[cloud-saves] fetch origin result:`, JSON.stringify(fetchAllResult)); 
+                    if (!fetchAllResult.success) {
+                        // 如果 fetch 失败，则无法继续
+                        console.error(`[cloud-saves] 获取远程 origin 失败: ${fetchAllResult.stderr}`);
+                        await saveConfig(config); // 保存未授权状态
+                        return res.status(500).json({ success: false, message: `无法获取远程仓库 origin 的信息`, details: fetchAllResult.stderr });
+                    }
+                    
+                    // Log remote ref existence after fetch
+                    console.log(`[cloud-saves] 检查本地是否存在 refs/remotes/origin/${targetBranch} (fetch origin 后)...`);
+                    const checkRemoteRefAfterFetch = await runGitCommand(`git show-ref refs/remotes/origin/${targetBranch}`);
+                    console.log(`[cloud-saves] show-ref refs/remotes/origin/${targetBranch} (fetch origin 后) result:`, JSON.stringify(checkRemoteRefAfterFetch));
+                    
+                    // Log all branches after fetch
+                    console.log(`[cloud-saves] 检查所有本地及远程跟踪分支 (fetch origin 后)...`);
+                    const checkAllBranchesAfterFetch = await runGitCommand(`git branch -a`);
+                    console.log(`[cloud-saves] git branch -a (fetch origin 后) result:`, JSON.stringify(checkAllBranchesAfterFetch));
+                    // --- END: Add detailed logging after fetch ---
+                    
+                    // 尝试基于 FETCH_HEAD 创建并切换到本地分支
+                    console.log(`[cloud-saves] 尝试基于 FETCH_HEAD 创建并切换到本地分支 ${targetBranch}...`);
+                    const createBranchResult = await runGitCommand(`git checkout -b ${targetBranch} FETCH_HEAD`);
+                    if (!createBranchResult.success) {
+                         console.error(`[cloud-saves] 基于 FETCH_HEAD 创建分支 ${targetBranch} 失败: ${createBranchResult.stderr}`);
+                        await saveConfig(config); // 保存未授权状态
+                        return res.status(500).json({ success: false, message: `无法基于 FETCH_HEAD 创建本地分支 ${targetBranch}`, details: createBranchResult.stderr });
+                    }
+                    console.log(`[cloud-saves] 成功创建并切换到本地分支 ${targetBranch}`);
+                     
+                    /* // 移除设置上游跟踪，因为它依赖于本地 refs/remotes/origin/main 的存在，而 fetch origin <branch> 不保证创建它
+                     console.log(`[cloud-saves] 设置本地分支 ${targetBranch} 跟踪 origin/${targetBranch}...`);
+                     const setUpstreamResult = await runGitCommand(`git branch --set-upstream-to=origin/${targetBranch} ${targetBranch}`);
+                     if (!setUpstreamResult.success) {
+                          // 警告但可能不阻断流程，因为分支已经创建并切换
+                          console.warn(`[cloud-saves] 设置分支 ${targetBranch} 跟踪信息失败: ${setUpstreamResult.stderr}`);
                      }
-                     // 切换到目标分支
-                     const checkoutResult = await runGitCommand(`git checkout ${targetBranch}`);
-                     if (!checkoutResult.success) {
-                          console.error(`[cloud-saves] 切换到分支 ${targetBranch} 失败: ${checkoutResult.stderr}`);
-                         await saveConfig(config); // 保存未授权状态
-                         return res.status(500).json({ success: false, message: `无法切换到分支 ${targetBranch}`, details: checkoutResult.stderr });
-                     }
+                    */
                 }
 
                 // 6. 标记为已授权并保存最终配置
