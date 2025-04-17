@@ -1,5 +1,5 @@
 [English Readme](./README.en.md)
-# Cloud Saves - 使用 GitHub 轻松备份和同步你的 SillyTavern 数据！
+# SillyTavern-Cloud Saves - 使用 GitHub 轻松备份和同步你的 SillyTavern 数据！
 
 大家好！
 
