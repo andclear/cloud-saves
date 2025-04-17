@@ -79,6 +79,27 @@ const DEFAULT_CONFIG = {
 let currentOperation = null;
 let autoSaveBackendTimer = null; // 后端定时器ID
 
+// ========== 辅助函数 ==========
+
+// 转义正则表达式特殊字符
+function escapeRegex(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
+
+// 在命令字符串中隐藏 Token 以供日志记录
+function maskTokenInCommand(cmd, tokenToMask) {
+    if (tokenToMask && cmd) {
+        const tokenPlaceholder = 'your_token(日志隐藏)';
+        // Mask the token specifically in the x-access-token format
+        const regex = new RegExp(`x-access-token:${escapeRegex(tokenToMask)}@`, 'g');
+        cmd = cmd.replace(regex, `x-access-token:${tokenPlaceholder}@`);
+        // 可选：如果 token 可能以其他形式出现，可添加更通用的屏蔽逻辑
+        // 例如： if (tokenToMask.length > 8) { const standaloneRegex = new RegExp(`\\b${escapeRegex(tokenToMask)}\\b`, 'g'); cmd = cmd.replace(standaloneRegex, tokenPlaceholder); }
+    }
+    return cmd;
+}
+
+
 // ========== 配置管理 ==========
 
 // 读取配置
@@ -122,10 +143,11 @@ async function runGitCommand(command, options = {}) {
     let tokenUrl = '';
     let temporarilySetUrl = false;
     const executeIn = options.cwd || DATA_DIR; // 优先使用传入的 cwd，否则默认 DATA_DIR
+    let token = ''; // 初始化 token
 
     try {
         config = await readConfig();
-        const token = config.github_token;
+        token = config.github_token; // 获取 token
         // 读取指定目录下的远程 URL
         let remoteShowResult;
         try {
@@ -144,7 +166,8 @@ async function runGitCommand(command, options = {}) {
             
             if (requiresTokenInjection) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                console.log(`[cloud-saves] DATA_DIR: 为命令注入带 token 的 URL: ${command}`);
+                 // 使用 maskTokenInCommand 隐藏日志中的 token
+                console.log(`[cloud-saves] DATA_DIR: 为命令注入带 token 的 URL: ${maskTokenInCommand(command, token)}`);
 
                 // 替换命令中的 'origin' 为带 token 的 URL
                 // 简单的替换，假设命令格式为 'git <verb> origin ...'
@@ -154,19 +177,21 @@ async function runGitCommand(command, options = {}) {
                 if (originIndex > -1) {
                     commandParts[originIndex] = tokenUrl; // 用带token的URL替换'origin'
                     command = commandParts.join(' ');
-                    console.log(`[cloud-saves] DATA_DIR: 修改后的命令: ${command}`);
+                     // 使用 maskTokenInCommand 隐藏日志中的 token
+                    console.log(`[cloud-saves] DATA_DIR: 修改后的命令: ${maskTokenInCommand(command, token)}`);
                 } else {
                     // 如果命令中没有明确的 'origin' (例如 'git push' 推送默认远程)，处理可能更复杂
-                    // 对于 'git push' 和 'git pull'，可以显式指定远程和分支
-                    // 例如 'git push tokenUrl branch' 或 'git pull tokenUrl branch'
                     // 为了简化，我们先假设常见的 'git <verb> origin ...' 格式
-                    console.warn(`[cloud-saves] DATA_DIR: 命令 "${command}" 中未找到 'origin'，无法自动注入 token URL。`);
+                     // 使用 maskTokenInCommand 隐藏日志中的 token
+                    console.warn(`[cloud-saves] DATA_DIR: 命令 "${maskTokenInCommand(command, token)}" 中未找到 'origin'，无法自动注入 token URL。`);
                     // 也可以选择在这里回退到 set-url 方式，或者让命令失败
                 }
             } else if (command.startsWith('git clone')) {
                 // clone 命令也需要处理
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
                  command = command.replace(originalRepoUrl, tokenUrl);
+                  // 使用 maskTokenInCommand 隐藏日志中的 token
+                  console.log(`[cloud-saves] DATA_DIR: 修改 clone 命令以注入 token: ${maskTokenInCommand(command, token)}`);
              }
         } else {
              // 对于不需要token注入或者原始URL无效的情况，保持命令不变
@@ -174,7 +199,8 @@ async function runGitCommand(command, options = {}) {
         // --- END: New URL Handling ---
 
         // 记录要执行的命令和目录
-        console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${command}`);
+         // 使用 maskTokenInCommand 隐藏日志中的 token
+        console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${maskTokenInCommand(command, token)}`);
 
         // --- BEGIN: Explicit Git Directory and Work Tree for DATA_DIR ---
         // If operating within DATA_DIR, explicitly set --git-dir and --work-tree
@@ -189,9 +215,11 @@ async function runGitCommand(command, options = {}) {
                  const parts = command.trim().split(' ');
                  parts.splice(1, 0, `--git-dir="${gitDir}"`, `--work-tree="${workTree}"`); 
                  finalCommand = parts.join(' ');
-                 console.log(`[cloud-saves] DATA_DIR: Injected explicit paths: ${finalCommand}`);
+                  // 使用 maskTokenInCommand 隐藏日志中的 token
+                 console.log(`[cloud-saves] DATA_DIR: Injected explicit paths: ${maskTokenInCommand(finalCommand, token)}`);
              } else {
-                 console.warn(`[cloud-saves] DATA_DIR: Command "${command}" does not start with 'git ', cannot inject paths.`);
+                  // 使用 maskTokenInCommand 隐藏日志中的 token
+                 console.warn(`[cloud-saves] DATA_DIR: Command "${maskTokenInCommand(command, token)}" does not start with 'git ', cannot inject paths.`);
             }
         } else {
             // For commands not running in DATA_DIR (like plugin update checks in __dirname), use the original command
@@ -256,7 +284,8 @@ async function runGitCommand(command, options = {}) {
         if (command.startsWith('git diff --binary')) {
             stdoutLog = '[二进制差异内容已省略]';
         }
-        console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
+         // 使用 maskTokenInCommand 隐藏错误日志中的 token
+        console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${maskTokenInCommand(command, token)}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
         
         return { 
             success: false, 
