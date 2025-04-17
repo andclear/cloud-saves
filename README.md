@@ -37,14 +37,13 @@
 
 ### 第一步：准备工作 (非常重要！)
 
-1.  **清理 SillyTavern 根目录**:
-    *   打开你的 SillyTavern 安装根目录（也就是包含 `start.bat`, `server.py` 等文件的那个目录）。
-    *   检查是否存在一个名为 `.git` 的隐藏文件夹。**如果存在，请务必将其删除！**
-    *   检查是否存在一个名为 `.gitignore` 的文件。**如果存在，也请将其删除！**
-    *   *原因：本插件会在 `/data` 目录独立管理 Git，根目录的 Git 会导致冲突。*
+1.  **检查 SillyTavern 根目录 (不再需要删除文件)**:
+    *   *先前版本需要删除根目录的 `.git` 和 `.gitignore` 以避免冲突。*
+    *   *现在插件已更新，可以正确处理嵌套仓库，**不再需要**删除这些文件。保留根目录的 `.git` 对更新 SillyTavern 很重要。*
+    *   *如果你之前按照旧说明删除了根目录的 `.git` 文件夹，建议从备份或重新下载 SillyTavern 来恢复它，以便能正常更新 SillyTavern 本身。*
 2.  **修改 SillyTavern 配置**:
     *   找到并用文本编辑器打开 SillyTavern 根目录下的 `config.yaml` 文件。
-    *   滚动到文件 **最末尾**，找到或添加以下两行，并确保它们的值如下设置：
+    *   滚动到文件 **最末尾**，找到或添加以下两行，**修改或确保**它们的值如下设置：
         ```yaml
         enableServerPlugins: true
         enableServerPluginsAutoUpdate: false

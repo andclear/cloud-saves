@@ -37,14 +37,13 @@ With Cloud Saves, you can:
 
 ### Step 1: Preparation (Very Important!)
 
-1.  **Clean Up SillyTavern Root Directory**:
-    *   Navigate to your SillyTavern installation root directory (the one containing `start.bat`, `server.py`, etc.).
-    *   Check if there's a hidden folder named `.git`. **If it exists, you must delete it!**
-    *   Check if there's a file named `.gitignore`. **If it exists, delete it as well!**
-    *   *Reason: This plugin manages its own Git repository within the `/data` directory. A Git repository in the root directory will cause conflicts.*
+1.  **Check SillyTavern Root Directory (File Deletion No Longer Required)**:
+    *   *Previous versions required deleting the root `.git` folder and `.gitignore` file to avoid conflicts.*
+    *   *The plugin has been updated to correctly handle nested repositories. You **no longer need** to delete these files. Keeping the root `.git` folder is important for updating SillyTavern.*
+    *   *If you previously deleted the root `.git` folder based on old instructions, it's recommended to restore it from a backup or by re-downloading SillyTavern to ensure you can update SillyTavern itself.*
 2.  **Modify SillyTavern Configuration**:
     *   Find and open the `config.yaml` file in your SillyTavern root directory with a text editor.
-    *   Scroll to the **very bottom** of the file. Find or add the following two lines, ensuring their values are set as shown:
+    *   Scroll to the **very bottom** of the file. Find or add the following two lines, **modifying or ensuring** their values are set as shown:
         ```yaml
         enableServerPlugins: true
         enableServerPluginsAutoUpdate: false
