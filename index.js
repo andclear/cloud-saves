@@ -137,28 +137,67 @@ async function runGitCommand(command, options = {}) {
              originalRepoUrl = ''; // 确保为空
         }
         
-        // 特殊处理推送/拉取/获取/列出远程引用时使用token (只在 DATA_DIR 中执行时才用 token)
-        if (executeIn === DATA_DIR && token && originalRepoUrl && originalRepoUrl.startsWith('https://') && 
-            (command.startsWith('git push') || command.startsWith('git pull') || command.startsWith('git fetch') || command.startsWith('git ls-remote'))) { 
-            if (!originalRepoUrl.includes('@github.com')) {
+        // --- BEGIN: New URL Handling --- 
+        // 对于 fetch/push/pull/ls-remote，直接将带 token 的 URL 注入命令，而不是修改 remote config
+        if (executeIn === DATA_DIR && token && originalRepoUrl && originalRepoUrl.startsWith('https://') && !originalRepoUrl.includes('@github.com')) {
+            const requiresTokenInjection = command.startsWith('git fetch') || command.startsWith('git pull') || command.startsWith('git push') || command.startsWith('git ls-remote');
+            
+            if (requiresTokenInjection) {
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                console.log(`[cloud-saves] DATA_DIR: 临时设置带token的remote URL，执行命令: ${command}`);
-                // 注意：这里的 set-url 仍然是在 DATA_DIR 操作
-                await execPromise(`git remote set-url origin ${tokenUrl}`, { cwd: DATA_DIR });
-                temporarilySetUrl = true;
-            }
-        }
+                console.log(`[cloud-saves] DATA_DIR: 为命令注入带 token 的 URL: ${command}`);
 
-        // 对clone命令也要修改URL (通常不在插件目录执行)
-        if (token && originalRepoUrl && originalRepoUrl.startsWith('https://') && command.startsWith('git clone')) {
-            if (!originalRepoUrl.includes('@github.com')) {
+                // 替换命令中的 'origin' 为带 token 的 URL
+                // 简单的替换，假设命令格式为 'git <verb> origin ...'
+                const commandParts = command.split(' ');
+                const originIndex = commandParts.indexOf('origin');
+
+                if (originIndex > -1) {
+                    commandParts[originIndex] = tokenUrl; // 用带token的URL替换'origin'
+                    command = commandParts.join(' ');
+                    console.log(`[cloud-saves] DATA_DIR: 修改后的命令: ${command}`);
+                } else {
+                    // 如果命令中没有明确的 'origin' (例如 'git push' 推送默认远程)，处理可能更复杂
+                    // 对于 'git push' 和 'git pull'，可以显式指定远程和分支
+                    // 例如 'git push tokenUrl branch' 或 'git pull tokenUrl branch'
+                    // 为了简化，我们先假设常见的 'git <verb> origin ...' 格式
+                    console.warn(`[cloud-saves] DATA_DIR: 命令 "${command}" 中未找到 'origin'，无法自动注入 token URL。`);
+                    // 也可以选择在这里回退到 set-url 方式，或者让命令失败
+                }
+            } else if (command.startsWith('git clone')) {
+                // clone 命令也需要处理
                 tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                command = command.replace(originalRepoUrl, tokenUrl);
-            }
-        }
+                 command = command.replace(originalRepoUrl, tokenUrl);
+             }
+        } else {
+             // 对于不需要token注入或者原始URL无效的情况，保持命令不变
+         }
+        // --- END: New URL Handling ---
 
         // 记录要执行的命令和目录
         console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${command}`);
+
+        // --- BEGIN: Explicit Git Directory and Work Tree for DATA_DIR ---
+        // If operating within DATA_DIR, explicitly set --git-dir and --work-tree
+        // to prevent interference from a parent repository (e.g., in SillyTavern root)
+        let finalCommand = command;
+        if (executeIn === DATA_DIR) {
+            const gitDir = path.join(DATA_DIR, '.git');
+            const workTree = DATA_DIR;
+            // Check if the command already starts with git (it should)
+            if (command.trim().startsWith('git ')) {
+                 // Inject the flags after 'git' but before the subcommand
+                 const parts = command.trim().split(' ');
+                 parts.splice(1, 0, `--git-dir="${gitDir}"`, `--work-tree="${workTree}"`); 
+                 finalCommand = parts.join(' ');
+                 console.log(`[cloud-saves] DATA_DIR: Injected explicit paths: ${finalCommand}`);
+             } else {
+                 console.warn(`[cloud-saves] DATA_DIR: Command "${command}" does not start with 'git ', cannot inject paths.`);
+            }
+        } else {
+            // For commands not running in DATA_DIR (like plugin update checks in __dirname), use the original command
+             finalCommand = command;
+        }
+        // --- END: Explicit Git Directory and Work Tree --- 
 
         // 处理选项参数
         const execOptions = { 
@@ -169,8 +208,8 @@ async function runGitCommand(command, options = {}) {
         if (options && options.input !== undefined) {
             const result = await new Promise((resolve, reject) => {
                 const childProcess = require('child_process').spawn(
-                    command.split(' ')[0], 
-                    command.split(' ').slice(1), 
+                    finalCommand.split(' ')[0], // Use finalCommand 
+                    finalCommand.split(' ').slice(1), // Use finalCommand 
                     { cwd: execOptions.cwd }
                 );
                 
@@ -206,15 +245,8 @@ async function runGitCommand(command, options = {}) {
             return result;
         } else {
             // 常规命令执行
-            const { stdout, stderr } = await execPromise(command, execOptions);
+            const { stdout, stderr } = await execPromise(finalCommand, execOptions); // Use finalCommand
             
-            // 如果临时设置了URL，命令完成后恢复 (只针对 DATA_DIR)
-            if (temporarilySetUrl && executeIn === DATA_DIR) {
-                console.log(`[cloud-saves] DATA_DIR: 恢复原始remote URL: ${originalRepoUrl}`);
-                await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
-                temporarilySetUrl = false;
-            }
-
             return { success: true, stdout, stderr };
         }
     } catch (error) {
@@ -226,17 +258,6 @@ async function runGitCommand(command, options = {}) {
         }
         console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${command}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
         
-        // 如果临时设置了URL且命令失败，尝试恢复 (只针对 DATA_DIR)
-        if (temporarilySetUrl && executeIn === DATA_DIR) {
-            try {
-                console.warn(`[cloud-saves] DATA_DIR: 命令失败，尝试恢复原始remote URL: ${originalRepoUrl}`);
-                await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
-                temporarilySetUrl = false;
-            } catch (revertError) {
-                console.error(`[cloud-saves] DATA_DIR: 恢复remote URL失败: ${revertError.message}`);
-            }
-        }
-
         return { 
             success: false, 
             error: error.message,
@@ -256,17 +277,31 @@ async function runGitCommand(command, options = {}) {
     }
 }
 
-// 检查Git是否已初始化
+// 检查Git是否已初始化 (现在需要显式指定git-dir)
 async function isGitInitialized() {
-    const result = await runGitCommand('git rev-parse --is-inside-work-tree');
-    return result.success && result.stdout.trim() === 'true';
+    // We need to check specifically if data/.git exists and is valid
+    try {
+        const gitDir = path.join(DATA_DIR, '.git');
+        const stats = await fs.stat(gitDir);
+        if (stats.isDirectory()) {
+            // Basic check passed, try a git command targeting it
+            const result = await runGitCommand('git rev-parse --is-inside-work-tree'); // runGitCommand will now add paths
+            return result.success && result.stdout.trim() === 'true';
+        } 
+    } catch (error) {
+        // If fs.stat fails (e.g., directory doesn't exist), it's not initialized
+        if (error.code === 'ENOENT') {
+            return false;
+        }
+        console.error("[cloud-saves] Error checking git initialization:", error);
+    }
+    return false;
 }
 
-// 初始化Git仓库
+// 初始化Git仓库 (不需要加路径，init 会在 cwd 创建 .git)
 async function initGitRepo() {
     // 检查是否已经初始化 
-    const isInitializedResult = await runGitCommand('git rev-parse --is-inside-work-tree');
-    if (isInitializedResult.success && isInitializedResult.stdout.trim() === 'true') {
+    if (await isGitInitialized()) {
         return { success: true, message: 'Git仓库已在data目录中初始化' };
     }
     console.log('[cloud-saves] 正在data目录中初始化Git仓库:', DATA_DIR);
@@ -424,7 +459,8 @@ async function listSaves() {
         currentOperation = 'list_saves';
         console.log('[cloud-saves] 获取存档列表');
         
-        const fetchResult = await runGitCommand('git fetch --tags');
+        // Explicitly fetch from origin and force update local tags to match remote
+        const fetchResult = await runGitCommand('git fetch origin --tags --force'); 
         if (!fetchResult.success) return { success: false, message: '从远程获取标签失败', details: fetchResult };
 
         // 修改 format，添加 %(taggername) 和 %(contents) 获取完整 tag 消息体
@@ -1011,6 +1047,8 @@ function setupBackendAutoSaveTimer() {
 
 async function init(router) {
     console.log('[cloud-saves] 初始化云存档插件...');
+    // Add this line with the full default URL and reminder
+    console.log('[cloud-saves] 插件 UI 访问地址 (如果端口不是8000请自行修改): http://127.0.0.1:8000/api/plugins/cloud-saves/ui'); 
     try {
         // --- BEGIN UI Serving --- 
         // 提供静态文件 - 修改路径为 /static
@@ -1183,7 +1221,7 @@ async function init(router) {
 
                 // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
                 console.log("[cloud-saves] 检查远程连接并获取标签...");
-                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags'); // 获取所有标签，并清理不存在的远程标签
+                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags --force'); // 获取所有标签，并清理不存在的远程标签，强制更新本地标签
                 if (!fetchTagsResult.success) {
                     await saveConfig(config); // 保存未授权状态
                     // 修改：返回 400 Bad Request 而不是 401
@@ -1195,12 +1233,16 @@ async function init(router) {
                 }
                 console.log("[cloud-saves] 获取标签成功。");
                 
-                // 5. 检查目标分支是否存在于远程 (ls-remote 已经会使用 token)
+                // 5. 检查目标分支是否存在于远程 (恢复使用 ls-remote，因其直接查询远程且 token 注入已修复)
                 console.log(`[cloud-saves] 检查远程分支 ${targetBranch}...`);
                 const checkRemoteBranchResult = await runGitCommand(`git ls-remote --heads origin ${targetBranch}`);
-                const remoteBranchExists = checkRemoteBranchResult.success && checkRemoteBranchResult.stdout.includes(`refs/heads/${targetBranch}`);
+                // ls-remote 成功且输出包含目标分支 ref 即表示存在
+                const remoteBranchExists = checkRemoteBranchResult.success && 
+                                         checkRemoteBranchResult.stdout && 
+                                         checkRemoteBranchResult.stdout.includes(`refs/heads/${targetBranch}`);
 
                 if (!remoteBranchExists) {
+                    // Branch truly doesn't exist remotely, proceed with creation
                     console.log(`[cloud-saves] 远程分支 ${targetBranch} 不存在，尝试创建...`);
                     // 尝试在本地创建一个空的提交（如果需要）并切换到该分支，然后推送到远程创建分支
                     try {
@@ -1221,21 +1263,38 @@ async function init(router) {
                         // 推送以在远程创建分支
                         console.log(`[cloud-saves] 推送以创建远程分支 ${targetBranch}...`);
                         const pushNewBranchResult = await runGitCommand(`git push --set-upstream origin ${targetBranch}`);
-                        if (!pushNewBranchResult.success) throw new Error(`推送创建远程分支失败: ${pushNewBranchResult.stderr}`);
+                        if (!pushNewBranchResult.success) {
+                             // --- BEGIN Improved non-fast-forward handling ---
+                             if (pushNewBranchResult.stderr && pushNewBranchResult.stderr.includes('non-fast-forward')) {
+                                 console.warn(`[cloud-saves] 推送创建分支 ${targetBranch} 时发生 non-fast-forward 错误，远程分支实际已存在且历史冲突。`);
+                                 throw new Error(`远程分支 ${targetBranch} 已存在，但本地历史与之冲突 (non-fast-forward)。请尝试手动执行 'git pull origin ${targetBranch}' 来合并远程更改，然后再试。`);
+                             } else {
+                                 throw new Error(`推送创建远程分支失败: ${pushNewBranchResult.stderr || pushNewBranchResult.error || '未知错误'}`);
+                             }
+                             // --- END Improved non-fast-forward handling ---
+                        }
                         console.log(`[cloud-saves] 远程分支 ${targetBranch} 创建成功`);
                     } catch (createBranchError) {
                         console.error(`[cloud-saves] 自动创建分支 ${targetBranch} 失败:`, createBranchError);
                         await saveConfig(config); // 保存未授权状态
-                        return res.status(500).json({ success: false, message: `无法自动创建远程分支 ${targetBranch}，请手动创建或检查权限`, details: createBranchError.message });
+                        // 将详细信息传递给前端
+                        return res.status(500).json({ success: false, message: `无法自动创建或同步远程分支 ${targetBranch}。错误：${createBranchError.message}`, details: createBranchError.message });
                     }
                 } else {
-                    console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在`);
+                    console.log(`[cloud-saves] 本地记录中远程分支 ${targetBranch} 已存在`);
                      // 如果远程分支存在，确保本地也存在并跟踪它
-                     const trackResult = await runGitCommand(`git branch --track ${targetBranch} origin/${targetBranch}`);
-                     // 改进：检查更具体的错误消息
-                     const trackError = trackResult.stderr.toLowerCase();
-                     if (!trackResult.success && !trackError.includes('already exists') && !trackError.includes('already set up to track')) {
-                          console.warn(`[cloud-saves] 设置本地分支跟踪远程分支时出错: ${trackResult.stderr}`);
+                     // 首先检查本地分支是否已存在
+                     const checkLocalBranchResult = await runGitCommand(`git show-ref --verify --quiet refs/heads/${targetBranch}`);
+                     if (!checkLocalBranchResult.success) {
+                         // 本地分支不存在，创建跟踪分支
+                         console.log(`[cloud-saves] 本地分支 ${targetBranch} 不存在，创建跟踪分支...`);
+                         const trackResult = await runGitCommand(`git branch --track ${targetBranch} origin/${targetBranch}`);
+                         // 改进：检查更具体的错误消息
+                         if (!trackResult.success && !trackResult.stderr.toLowerCase().includes('already exists')) {
+                              console.warn(`[cloud-saves] 设置本地分支跟踪远程分支时出错: ${trackResult.stderr}`);
+                         }
+                     } else {
+                         console.log(`[cloud-saves] 本地分支 ${targetBranch} 已存在，跳过创建跟踪分支`);
                      }
                      // 切换到目标分支
                      const checkoutResult = await runGitCommand(`git checkout ${targetBranch}`);
@@ -1253,7 +1312,7 @@ async function init(router) {
                 // 可选：尝试获取GitHub用户名并保存
                 try {
                     const validationResponse = await fetch('https://api.github.com/user', {
-                        headers: { 'Authorization': `token ${github_token}` }
+                        headers: { 'Authorization': `token ${config.github_token}` }
                     });
                     if (validationResponse.ok) {
                         const userData = await validationResponse.json();
