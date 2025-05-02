@@ -805,19 +805,21 @@ async function applyTempStash() {
 
     try {
         const git = simpleGit(DATA_DIR);
+        // Find the correct stash index (more robust than assuming stash@{0})
         const stashList = await git.stashList();
          const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
         if (!tempStash) {
-            config.has_temp_stash = false;
+            config.has_temp_stash = false; // Clear flag if stash doesn't exist anymore
             await saveConfig(config);
              return { success: false, message: 'Temporary stash entry not found in stash list' };
         }
         
-        const stashRef = tempStash.name;
+        const stashRef = tempStash.ref; // e.g., 'stash@{0}' (Changed from .name)
 
         console.log(`[cloud-saves] Applying temporary stash: ${stashRef}`);
         await git.stash(['apply', stashRef]);
 
+        // Stash is applied, but not dropped. We SHOULD drop it now.
         console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
         await git.stash(['drop', stashRef]);
 
@@ -827,6 +829,7 @@ async function applyTempStash() {
 
         return { success: true, message: 'Temporary stash applied and dropped successfully' };
     } catch (error) {
+        // If apply fails, don't drop or clear the flag
         return handleGitError(error, '应用临时Stash');
     }
 }
@@ -839,15 +842,16 @@ async function discardTempStash() {
 
     try {
         const git = simpleGit(DATA_DIR);
+        // Find the correct stash index
         const stashList = await git.stashList();
         const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
         if (!tempStash) {
-             config.has_temp_stash = false;
+             config.has_temp_stash = false; // Clear flag if stash doesn't exist anymore
              await saveConfig(config);
              return { success: true, message: 'Temporary stash entry not found in stash list (already gone)' };
         }
         
-        const stashRef = tempStash.name;
+        const stashRef = tempStash.ref; // e.g., 'stash@{0}' (Changed from .name)
 
         console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
         await git.stash(['drop', stashRef]);
@@ -857,6 +861,8 @@ async function discardTempStash() {
 
         return { success: true, message: 'Temporary stash discarded' };
     } catch (error) {
+        // If drop fails, don't clear flag? Or assume it's gone?
+        // Let's assume it might still be there on error.
         return handleGitError(error, '丢弃临时Stash');
     }
 }
