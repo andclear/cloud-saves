@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentSaves = [];
     let confirmCallback = null;
     let renameTarget = null;
+    let initialConfigHasToken = false; // 新增：用于跟踪初始加载时是否有token
 
     // 获取DOM元素引用
     const authSection = document.getElementById('auth-section');
@@ -193,15 +194,23 @@ document.addEventListener('DOMContentLoaded', function() {
             const config = await apiCall('config');
             
             if (config.repo_url) repoUrlInput.value = config.repo_url;
-            if (config.github_token) githubTokenInput.value = config.github_token;
             if (config.display_name) displayNameInput.value = config.display_name;
             if (config.branch) branchInput.value = config.branch;
             
-            // 修改：只填充UI，不管理定时器状态
+            // --- Token Input Handling ---
+            initialConfigHasToken = config.has_github_token; // 记录初始状态
+            if (initialConfigHasToken) {
+                githubTokenInput.placeholder = "访问令牌已保存"; // 设置提示
+                githubTokenInput.value = ""; // 确保实际值为空
+            } else {
+                githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx"; // 默认提示
+                githubTokenInput.value = "";
+            }
+            // --- End Token Input Handling ---
+            
             autoSaveEnabledSwitch.checked = config.autoSaveEnabled || false;
             autoSaveIntervalInput.value = config.autoSaveInterval || 30;
             autoSaveTargetTagInput.value = config.autoSaveTargetTag || '';
-            // 根据开关状态显示/隐藏选项
             autoSaveOptionsDiv.style.display = autoSaveEnabledSwitch.checked ? 'flex' : 'none';
             
             isAuthorized = config.is_authorized;
@@ -215,6 +224,10 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (error) {
             console.error('初始化失败:', error);
             showToast('错误', `初始化失败: ${error.message}`, 'error');
+            // 初始化失败时，也重置 token 输入框状态
+            githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
+            githubTokenInput.value = "";
+            initialConfigHasToken = false;
         }
     }
 
@@ -232,6 +245,12 @@ document.addEventListener('DOMContentLoaded', function() {
             createSaveSection.style.display = 'block';
             savesSection.style.display = 'block';
             autoSaveSection.style.display = 'block'; // 显示定时存档区域
+
+            // 授权成功后，如果后台有token，确保placeholder是"已保存"
+            if (initialConfigHasToken) {
+                githubTokenInput.placeholder = "访问令牌已保存";
+                githubTokenInput.value = ""; // 再次确保值为空
+            }
         } else {
             authStatus.style.display = 'none';
             logoutBtn.style.display = 'none';
@@ -240,6 +259,12 @@ document.addEventListener('DOMContentLoaded', function() {
             createSaveSection.style.display = 'none';
             savesSection.style.display = 'none';
             autoSaveSection.style.display = 'none'; // 隐藏定时存档区域
+
+            // --- ADDED: Reset token input on logout/deauthorization ---
+            githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
+            githubTokenInput.value = "";
+            initialConfigHasToken = false; // 标记为无token
+            // --- End Added ---
         }
     }
 
@@ -698,44 +723,42 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // 授权后端仓库
-    async function authorize(repoUrl, token, displayName, branch) {
+    // --- 授权函数 (MODIFIED - 移除内部 token 检查) ---
+    async function authorize(repoUrl, displayName, branch) { // 移除 token 参数
         try {
-            if (!repoUrl || !token) {
-                showToast('错误', '仓库URL和访问令牌不能为空', 'error');
-                return;
+            // URL 检查还是需要的，可以在调用前做，或者保留在这里
+            if (!repoUrl) {
+                 showToast('错误', '仓库 URL 不能为空', 'error');
+                 return;
             }
-            
+
             showLoading('正在授权并连接仓库...');
-            
+
+            // 注意：/authorize 接口不需要传递 token，它会从后端配置读取
             const result = await apiCall('authorize', 'POST', {
-                branch: branch
+                branch: branch // 只传递分支信息
             });
-            
+
             if (result.success) {
                 isAuthorized = true;
-                updateAuthUI(true);
-                
-                // 刷新状态
+                updateAuthUI(true); // 会根据 initialConfigHasToken 设置 placeholder
                 await refreshStatus();
-                // 获取存档列表
                 await loadSavesList();
-                
                 showToast('成功', '仓库授权成功！', 'success');
             } else {
                 throw new Error(result.message || '授权失败');
             }
-            
+
             hideLoading();
         } catch (error) {
             hideLoading();
             console.error('授权失败:', error);
-            
+
             authStatus.innerHTML = `<i class="bi bi-x-circle-fill text-danger me-2"></i>授权失败: ${error.message}`;
             authStatus.classList.remove('alert-success');
             authStatus.classList.add('alert-danger');
             authStatus.style.display = 'block';
-            
+
             showToast('错误', `授权失败: ${error.message}`, 'error');
         }
     }
@@ -1000,7 +1023,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // --- 事件监听器绑定 --- (放在函数定义之后)
+    // --- 事件监听器绑定 --- (MODIFIED - 调用 authorize 时不再传 token)
     safeAddEventListener(initRepoBtn, 'click', () => {
         showConfirmDialog(
             '确认强制初始化仓库',
@@ -1011,18 +1034,34 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 'init-repo-btn');
     safeAddEventListener(configureBtn, 'click', saveConfiguration, 'configure-btn');
     safeAddEventListener(authorizeBtn, 'click', async () => {
-        const configSaved = await saveConfiguration();
-        if (configSaved) {
-            const repoUrl = repoUrlInput.value.trim();
-            const token = githubTokenInput.value.trim();
-            const displayName = displayNameInput.value.trim();
-            const branch = branchInput.value.trim() || 'main';
-            if (repoUrl && token) {
-                await authorize(repoUrl, token, displayName, branch);
-            } else {
-                showToast('提示', '仓库URL和访问令牌是授权所必需的', 'warning');
-            }
+        const repoUrl = repoUrlInput.value.trim();
+        const tokenInputValue = githubTokenInput.value.trim(); // 读取当前输入框的值
+        const displayName = displayNameInput.value.trim();
+        const branch = branchInput.value.trim() || 'main';
+
+        if (!repoUrl) {
+            showToast('错误', '仓库 URL 不能为空', 'error');
+            return;
         }
+        // 检查1: 如果用户 *输入了新* token
+        if (tokenInputValue && tokenInputValue !== "") {
+             showToast('提示', '检测到新的访问令牌输入，请先点击"配置"按钮保存新令牌，然后再点击"授权并连接"。', 'info');
+             return; // 阻止直接授权
+        }
+        // 检查2: 如果用户 *没输入新* token，且 *后台原本就没* token
+        if (!tokenInputValue && !initialConfigHasToken) {
+             showToast('错误', 'GitHub 访问令牌不能为空，请在上方输入或点击"配置"保存。', 'error');
+             return;
+        }
+
+        // 如果执行到这里，说明：
+        // - URL 已输入
+        // - 要么输入框为空且后台有 token (initialConfigHasToken is true) -> 使用后台 token
+        // (已经排除了"输入框为空且后台没token" 和 "输入框有新token" 的情况)
+
+        // 执行授权 (不再传递 tokenInputValue)
+        await authorize(repoUrl, displayName, branch);
+
     }, 'authorize-btn');
     safeAddEventListener(logoutBtn, 'click', () => {
         showConfirmDialog('确认断开连接', '您确定要断开与仓库的连接吗？这将不会删除任何数据。', logout, 'primary');
@@ -1114,6 +1153,25 @@ document.addEventListener('DOMContentLoaded', function() {
             showToast('错误', `检查更新时发生错误: ${error.message}`, 'error');
         }
     }
+
+    // --- 绑定事件 --- (MODIFIED for githubTokenInput focus/blur)
+    safeAddEventListener(githubTokenInput, 'focus', () => {
+        if (githubTokenInput.placeholder === "访问令牌已保存") {
+            githubTokenInput.placeholder = "输入新令牌以覆盖..."; // 提供更清晰的提示
+        }
+    }, 'github-token-focus');
+
+    safeAddEventListener(githubTokenInput, 'blur', () => {
+        // 当输入框失去焦点时
+        if (githubTokenInput.value === "" && initialConfigHasToken) {
+            // 如果输入框是空的，并且我们知道后台本来是有token的
+            githubTokenInput.placeholder = "访问令牌已保存"; // 恢复提示
+        } else if (githubTokenInput.value === "" && !initialConfigHasToken) {
+             // 如果输入框是空的，且后台本来就没token
+             githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx"; // 恢复默认提示
+        }
+        // 如果用户输入了内容，placeholder 不会被显示，所以不需要处理这种情况
+    }, 'github-token-blur');
 
     // 初始化
     init();

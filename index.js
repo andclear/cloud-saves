@@ -1,14 +1,9 @@
 const fs = require('fs').promises;
 const path = require('path');
-const { exec } = require('child_process');
-const util = require('util');
 const express = require('express');
 const crypto = require('crypto');
+const simpleGit = require('simple-git');
 
-// 将exec转换为Promise
-const execPromise = util.promisify(exec);
-
-// 导入node-fetch
 let fetch;
 try {
     import('node-fetch').then(module => {
@@ -18,11 +13,9 @@ try {
     });
 } catch (error) {
     console.error('无法导入node-fetch:', error);
-    // 备用实现
     fetch = async (url, options) => {
         const https = require('https');
         const http = require('http');
-        
         return new Promise((resolve, reject) => {
             const client = url.startsWith('https') ? https : http;
             const req = client.request(url, options, (res) => {
@@ -43,22 +36,17 @@ try {
     };
 }
 
-// 插件信息
 const info = {
     id: 'cloud-saves',
     name: 'Cloud Saves',
     description: '通过GitHub仓库创建、管理和恢复SillyTavern的云端存档。',
-    version: '1.0.0',
+    version: '1.0.0', // TODO: Consider updating version after refactor
 };
 
-// 配置文件路径
 const CONFIG_PATH = path.join(__dirname, 'config.json');
-// 数据目录路径
 const DATA_DIR = path.join(process.cwd(), 'data');
-// 默认分支名
 const DEFAULT_BRANCH = 'main';
 
-// 默认配置
 const DEFAULT_CONFIG = {
     repo_url: '',
     branch: DEFAULT_BRANCH,
@@ -69,470 +57,372 @@ const DEFAULT_CONFIG = {
     last_save: null,
     current_save: null,
     has_temp_stash: false,
-    // 新增：定时存档配置
     autoSaveEnabled: false,
-    autoSaveInterval: 30, // 默认30分钟
+    autoSaveInterval: 30,
     autoSaveTargetTag: '',
 };
 
-// 当前操作状态
 let currentOperation = null;
-let autoSaveBackendTimer = null; // 后端定时器ID
+let autoSaveBackendTimer = null;
 
-// ========== 辅助函数 ==========
-
-// 转义正则表达式特殊字符
-function escapeRegex(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
-}
-
-// 在命令字符串中隐藏 Token 以供日志记录
-function maskTokenInCommand(cmd, tokenToMask) {
-    if (tokenToMask && cmd) {
-        const tokenPlaceholder = 'your_token(日志隐藏)';
-        // Mask the token specifically in the x-access-token format
-        const regex = new RegExp(`x-access-token:${escapeRegex(tokenToMask)}@`, 'g');
-        cmd = cmd.replace(regex, `x-access-token:${tokenPlaceholder}@`);
-        // 可选：如果 token 可能以其他形式出现，可添加更通用的屏蔽逻辑
-        // 例如： if (tokenToMask.length > 8) { const standaloneRegex = new RegExp(`\\b${escapeRegex(tokenToMask)}\\b`, 'g'); cmd = cmd.replace(standaloneRegex, tokenPlaceholder); }
-    }
-    return cmd;
-}
-
-
-// ========== 配置管理 ==========
-
-// 读取配置
 async function readConfig() {
     try {
         const data = await fs.readFile(CONFIG_PATH, 'utf8');
         const config = JSON.parse(data);
-        // 确保旧配置有默认分支和定时存档设置
-        if (!config.branch) {
-            config.branch = DEFAULT_BRANCH;
-        }
-        if (config.autoSaveEnabled === undefined) {
-            config.autoSaveEnabled = DEFAULT_CONFIG.autoSaveEnabled;
-        }
-        if (config.autoSaveInterval === undefined) {
-            config.autoSaveInterval = DEFAULT_CONFIG.autoSaveInterval;
-        }
-        if (config.autoSaveTargetTag === undefined) {
-            config.autoSaveTargetTag = DEFAULT_CONFIG.autoSaveTargetTag;
-        }
+        config.branch = config.branch || DEFAULT_BRANCH;
+        config.autoSaveEnabled = config.autoSaveEnabled === undefined ? DEFAULT_CONFIG.autoSaveEnabled : config.autoSaveEnabled;
+        config.autoSaveInterval = config.autoSaveInterval === undefined ? DEFAULT_CONFIG.autoSaveInterval : config.autoSaveInterval;
+        config.autoSaveTargetTag = config.autoSaveTargetTag === undefined ? DEFAULT_CONFIG.autoSaveTargetTag : config.autoSaveTargetTag;
         return config;
     } catch (error) {
-        // 如果配置文件不存在或解析失败，创建默认配置
         console.warn('Failed to read or parse config, creating default:', error.message);
         await fs.writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
         return { ...DEFAULT_CONFIG };
     }
 }
 
-// 保存配置
 async function saveConfig(config) {
     await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
-// ========== Git 操作核心功能 ==========
+async function getGitInstance(cwd = DATA_DIR) {
+    const options = {
+        baseDir: cwd,
+        binary: 'git',
+        maxConcurrentProcesses: 6, // Default
+    };
+    const git = simpleGit(options);
+    const config = await readConfig();
 
-// 执行git命令 - 修改：增加可选的 cwd 参数
-async function runGitCommand(command, options = {}) {
-    let config = {};
-    let originalRepoUrl = '';
-    let tokenUrl = '';
-    let temporarilySetUrl = false;
-    const executeIn = options.cwd || DATA_DIR; // 优先使用传入的 cwd，否则默认 DATA_DIR
-    let token = ''; // 初始化 token
-
-    try {
-        config = await readConfig();
-        token = config.github_token; // 获取 token
-        // 读取指定目录下的远程 URL
-        let remoteShowResult;
+    if (cwd === DATA_DIR && config.repo_url && config.github_token) {
         try {
-            remoteShowResult = await execPromise('git remote get-url origin', { cwd: executeIn });
-            originalRepoUrl = remoteShowResult.stdout.trim();
-        } catch (getRemoteError) {
-            // 如果获取远程URL失败（例如还没设置远程），则 originalRepoUrl 保持空
-             console.warn(`[cloud-saves] 在目录 ${executeIn} 获取 remote URL 失败:`, getRemoteError.stderr || getRemoteError.message);
-             originalRepoUrl = ''; // 确保为空
-        }
-        
-        // --- BEGIN: New URL Handling --- 
-        // 对于 fetch/push/pull/ls-remote，直接将带 token 的 URL 注入命令，而不是修改 remote config
-        if (executeIn === DATA_DIR && token && originalRepoUrl && originalRepoUrl.startsWith('https://') && !originalRepoUrl.includes('@github.com')) {
-            const requiresTokenInjection = command.startsWith('git fetch') || command.startsWith('git pull') || command.startsWith('git push') || command.startsWith('git ls-remote');
-            
-            if (requiresTokenInjection) {
-                tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                 // 使用 maskTokenInCommand 隐藏日志中的 token
-                console.log(`[cloud-saves] DATA_DIR: 为命令注入带 token 的 URL: ${maskTokenInCommand(command, token)}`);
+            const remotes = await git.getRemotes(true);
+            const origin = remotes.find(r => r.name === 'origin');
+            const originalUrl = config.repo_url;
+            let authUrl = originalUrl;
 
-                // 替换命令中的 'origin' 为带 token 的 URL
-                // 简单的替换，假设命令格式为 'git <verb> origin ...'
-                const commandParts = command.split(' ');
-                const originIndex = commandParts.indexOf('origin');
-
-                if (originIndex > -1) {
-                    commandParts[originIndex] = tokenUrl; // 用带token的URL替换'origin'
-                    command = commandParts.join(' ');
-                     // 使用 maskTokenInCommand 隐藏日志中的 token
-                    console.log(`[cloud-saves] DATA_DIR: 修改后的命令: ${maskTokenInCommand(command, token)}`);
-                } else {
-                    // 如果命令中没有明确的 'origin' (例如 'git push' 推送默认远程)，处理可能更复杂
-                    // 为了简化，我们先假设常见的 'git <verb> origin ...' 格式
-                     // 使用 maskTokenInCommand 隐藏日志中的 token
-                    console.warn(`[cloud-saves] DATA_DIR: 命令 "${maskTokenInCommand(command, token)}" 中未找到 'origin'，无法自动注入 token URL。`);
-                    // 也可以选择在这里回退到 set-url 方式，或者让命令失败
-                }
-            } else if (command.startsWith('git clone')) {
-                // clone 命令也需要处理
-                tokenUrl = originalRepoUrl.replace('https://', `https://x-access-token:${token}@`);
-                 command = command.replace(originalRepoUrl, tokenUrl);
-                  // 使用 maskTokenInCommand 隐藏日志中的 token
-                  console.log(`[cloud-saves] DATA_DIR: 修改 clone 命令以注入 token: ${maskTokenInCommand(command, token)}`);
-             }
-        } else {
-             // 对于不需要token注入或者原始URL无效的情况，保持命令不变
-         }
-        // --- END: New URL Handling ---
-
-        // 记录要执行的命令和目录
-         // 使用 maskTokenInCommand 隐藏日志中的 token
-        console.log(`[cloud-saves][CWD: ${path.basename(executeIn)}] 执行命令: ${maskTokenInCommand(command, token)}`);
-
-        // --- BEGIN: Explicit Git Directory and Work Tree for DATA_DIR ---
-        // If operating within DATA_DIR, explicitly set --git-dir and --work-tree
-        // to prevent interference from a parent repository (e.g., in SillyTavern root)
-        let finalCommand = command;
-        if (executeIn === DATA_DIR) {
-            const gitDir = path.join(DATA_DIR, '.git');
-            const workTree = DATA_DIR;
-            // Check if the command already starts with git (it should)
-            if (command.trim().startsWith('git ')) {
-                 // Inject the flags after 'git' but before the subcommand
-                 const parts = command.trim().split(' ');
-                 parts.splice(1, 0, `--git-dir="${gitDir}"`, `--work-tree="${workTree}"`); 
-                 finalCommand = parts.join(' ');
-                  // 使用 maskTokenInCommand 隐藏日志中的 token
-                 console.log(`[cloud-saves] DATA_DIR: Injected explicit paths: ${maskTokenInCommand(finalCommand, token)}`);
-             } else {
-                  // 使用 maskTokenInCommand 隐藏日志中的 token
-                 console.warn(`[cloud-saves] DATA_DIR: Command "${maskTokenInCommand(command, token)}" does not start with 'git ', cannot inject paths.`);
+            if (originalUrl.startsWith('https://') && !originalUrl.includes('@')) {
+                authUrl = originalUrl.replace('https://', `https://x-access-token:${config.github_token}@`);
             }
-        } else {
-            // For commands not running in DATA_DIR (like plugin update checks in __dirname), use the original command
-             finalCommand = command;
-        }
-        // --- END: Explicit Git Directory and Work Tree --- 
-
-        // 处理选项参数
-        const execOptions = { 
-            cwd: executeIn // 使用确定的执行目录
-        };
-        
-        // 处理标准输入
-        if (options && options.input !== undefined) {
-            const result = await new Promise((resolve, reject) => {
-                const childProcess = require('child_process').spawn(
-                    finalCommand.split(' ')[0], // Use finalCommand 
-                    finalCommand.split(' ').slice(1), // Use finalCommand 
-                    { cwd: execOptions.cwd }
-                );
-                
-                let stdout = '';
-                let stderr = '';
-                
-                childProcess.stdout.on('data', (data) => {
-                    stdout += data.toString();
-                });
-                
-                childProcess.stderr.on('data', (data) => {
-                    stderr += data.toString();
-                });
-                
-                childProcess.on('close', (code) => {
-                    if (code === 0) {
-                        resolve({ success: true, stdout, stderr });
-                    } else {
-                        resolve({ success: false, stdout, stderr });
-                    }
-                });
-                
-                childProcess.on('error', (err) => {
-                    reject(err);
-                });
-                
-                if (options.input) {
-                    childProcess.stdin.write(options.input);
-                    childProcess.stdin.end();
-                }
-            });
-            
-            return result;
-        } else {
-            // 常规命令执行
-            const { stdout, stderr } = await execPromise(finalCommand, execOptions); // Use finalCommand
-            
-            return { success: true, stdout, stderr };
-        }
-    } catch (error) {
-        // 修改错误日志，避免打印大型二进制内容
-        let stdoutLog = error.stdout || '';
-        let stderrLog = error.stderr || '';
-        if (command.startsWith('git diff --binary')) {
-            stdoutLog = '[二进制差异内容已省略]';
-        }
-         // 使用 maskTokenInCommand 隐藏错误日志中的 token
-        console.error(`[cloud-saves][CWD: ${path.basename(executeIn)}] Git命令失败: ${maskTokenInCommand(command, token)}\n错误: ${error.message}\nStdout: ${stdoutLog}\nStderr: ${stderrLog}`);
-        
-        return { 
-            success: false, 
-            error: error.message,
-            stdout: error.stdout || '',
-            stderr: error.stderr || ''
-        };
-    } finally {
-        // 最终安全检查：确保URL被恢复 (只针对 DATA_DIR)
-        if (temporarilySetUrl && executeIn === DATA_DIR) {
-            try {
-                console.warn(`[cloud-saves] DATA_DIR: 最终检查：在finally块中恢复remote URL: ${originalRepoUrl}`);
-                await execPromise(`git remote set-url origin ${originalRepoUrl}`, { cwd: DATA_DIR });
-            } catch (finalRevertError) {
-                console.error(`[cloud-saves] DATA_DIR: 在finally块中恢复remote URL失败: ${finalRevertError.message}`);
+            if (origin && origin.refs.push !== authUrl) {
+                 console.log(`[cloud-saves] Configuring remote 'origin' with auth URL for ${path.basename(cwd)}`);
+                 await git.remote(['set-url', 'origin', authUrl]);
+            } else if (!origin && originalUrl) {
+                 console.log(`[cloud-saves] Adding remote 'origin' with auth URL for ${path.basename(cwd)}`);
+                 await git.addRemote('origin', authUrl);
             }
+        } catch (error) {
+            console.warn(`[cloud-saves] Failed to configure authenticated remote for ${path.basename(cwd)}:`, error.message);
         }
     }
+    
+    return git;
 }
 
-// 检查Git是否已初始化 (现在需要显式指定git-dir)
+function handleGitError(error, operation = 'Git operation') {
+    console.error(`[cloud-saves] ${operation} failed:`, error.message);
+    return {
+        success: false,
+        message: `${operation} failed`,
+        details: error.message || error.stack || 'Unknown simple-git error',
+        error: error
+    };
+}
+
 async function isGitInitialized() {
-    // We need to check specifically if data/.git exists and is valid
     try {
+        const git = simpleGit(DATA_DIR);
         const gitDir = path.join(DATA_DIR, '.git');
-        const stats = await fs.stat(gitDir);
-        if (stats.isDirectory()) {
-            // Basic check passed, try a git command targeting it
-            const result = await runGitCommand('git rev-parse --is-inside-work-tree'); // runGitCommand will now add paths
-            return result.success && result.stdout.trim() === 'true';
-        } 
-    } catch (error) {
-        // If fs.stat fails (e.g., directory doesn't exist), it's not initialized
-        if (error.code === 'ENOENT') {
-            return false;
+        try {
+           await fs.access(gitDir);
+        } catch {
+           return false;
         }
-        console.error("[cloud-saves] Error checking git initialization:", error);
+        return await git.checkIsRepo();
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            console.error("[cloud-saves] Error checking git initialization:", error);
+        }
+        return false;
     }
-    return false;
 }
 
-// 初始化Git仓库 (不需要加路径，init 会在 cwd 创建 .git)
+async function addGitkeepRecursively(directory) {
+    try {
+        const entries = await fs.readdir(directory, { withFileTypes: true });
+        let hasGitkeep = false;
+        const subDirectories = [];
+
+        for (const entry of entries) {
+            if (entry.isFile() && entry.name === '.gitkeep') {
+                hasGitkeep = true;
+            }
+            if (entry.isDirectory()) {
+                // Skip .git directory itself
+                if (entry.name !== '.git') {
+                    subDirectories.push(path.join(directory, entry.name));
+                }
+            }
+        }
+
+        // If no .gitkeep found in the current directory, create one
+        if (!hasGitkeep) {
+            const gitkeepPath = path.join(directory, '.gitkeep');
+            try {
+                // Check if it exists first, might have been created by another process
+                await fs.access(gitkeepPath);
+            } catch (e) {
+                try {
+                    await fs.writeFile(gitkeepPath, ''); // Create empty file
+                    console.log(`[cloud-saves] Created .gitkeep in ${path.relative(DATA_DIR, directory) || '.'}`);
+                } catch (writeError) {
+                    console.error(`[cloud-saves] Failed to create .gitkeep in ${path.relative(DATA_DIR, directory) || '.'}:`, writeError);
+                }
+            }
+        }
+
+        // Recursively call for subdirectories
+        for (const subDir of subDirectories) {
+            await addGitkeepRecursively(subDir);
+        }
+
+    } catch (error) {
+        console.error(`[cloud-saves] Error processing directory ${path.relative(DATA_DIR, directory) || '.'} for .gitkeep:`, error);
+    }
+}
+
+// NEW: Helper function to recursively remove nested .git and .gitignore files
+async function removeNestedGitFiles(currentPath) {
+    // Safety check: Never operate directly on the main DATA_DIR itself for removal
+    if (currentPath === DATA_DIR) {
+        try {
+            const topLevelEntries = await fs.readdir(currentPath, { withFileTypes: true });
+            for (const entry of topLevelEntries) {
+                if (entry.isDirectory() && entry.name !== '.git') { // Don't recurse into the main .git!
+                    await removeNestedGitFiles(path.join(currentPath, entry.name));
+                }
+                // Optionally remove top-level .gitignore if needed, but usually we want to keep the main one.
+                // else if (entry.isFile() && entry.name === '.gitignore') { ... remove logic ... }
+            }
+        } catch (error) {
+             console.error(`[cloud-saves] Error reading top-level directory ${currentPath} for nested git removal:`, error);
+        }
+        return; // Stop recursion at top level
+    }
+
+    // Process subdirectories
+    try {
+        const entries = await fs.readdir(currentPath, { withFileTypes: true });
+        for (const entry of entries) {
+            const entryPath = path.join(currentPath, entry.name);
+            if (entry.isDirectory()) {
+                if (entry.name === '.git') {
+                    try {
+                        console.warn(`[cloud-saves] Removing nested .git directory: ${entryPath}`);
+                        await fs.rm(entryPath, { recursive: true, force: true });
+                    } catch (rmError) {
+                        console.error(`[cloud-saves] Failed to remove nested .git directory ${entryPath}:`, rmError);
+                    }
+                } else {
+                    // Recursively process other subdirectories
+                    await removeNestedGitFiles(entryPath);
+                }
+            } else if (entry.isFile() && entry.name === '.gitignore') {
+                try {
+                    console.warn(`[cloud-saves] Removing nested .gitignore file: ${entryPath}`);
+                    await fs.rm(entryPath, { force: true });
+                } catch (rmError) {
+                    console.error(`[cloud-saves] Failed to remove nested .gitignore file ${entryPath}:`, rmError);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`[cloud-saves] Error processing directory ${currentPath} for nested git file removal:`, error);
+    }
+}
+
 async function initGitRepo() {
-    // 检查是否已经初始化 
     if (await isGitInitialized()) {
+        // If already initialized, we might still want to run the cleanup?
+        // Or only run cleanup on fresh init? Let's do it only on fresh init for now.
+        console.log('[cloud-saves] Git repository already initialized in data directory.');
+        // Optionally, trigger cleanup here too if needed for existing setups upon re-auth/re-init?
+        // console.log('[cloud-saves] Running nested .git/.gitignore cleanup on existing repo...');
+        // await removeNestedGitFiles(DATA_DIR);
         return { success: true, message: 'Git仓库已在data目录中初始化' };
     }
-    console.log('[cloud-saves] 正在data目录中初始化Git仓库:', DATA_DIR);
 
-    // 尝试初始化仓库
-    let initResult;
+    console.log('[cloud-saves] 正在data目录中初始化Git仓库:', DATA_DIR);
     try {
-        console.log(`[cloud-saves] 执行: git init in ${DATA_DIR}`);
-        const { stdout, stderr } = await execPromise('git init', { cwd: DATA_DIR });
-        console.log('[cloud-saves] git init stdout:', stdout);
-        console.log('[cloud-saves] git init stderr:', stderr);
-        initResult = { success: true, stdout, stderr, message: 'Git仓库初始化成功' };
-        
-        // --- BEGIN: Create .gitignore in data directory after init ---
+        const git = simpleGit(DATA_DIR);
+        await git.init();
+        console.log('[cloud-saves] git init 成功');
+
+        // --- ADDED: Remove nested .git and .gitignore FIRST ---
+        console.warn('[cloud-saves] WARNING: Removing nested .git directories and .gitignore files within subdirectories...');
+        await removeNestedGitFiles(DATA_DIR); // Start the recursive removal
+        console.log('[cloud-saves] Finished removing nested git files.');
+        // --- END ADDED ---
+
+        // --- THEN add .gitkeep ---
+        console.log('[cloud-saves] Adding .gitkeep files to ensure directory tracking...');
+        await addGitkeepRecursively(DATA_DIR);
+        console.log('[cloud-saves] Finished adding .gitkeep files.');
+        // --- END .gitkeep ---
+
+        // --- FINALLY create the main .gitignore ---
         try {
             const gitignorePath = path.join(DATA_DIR, '.gitignore');
-            // New content: Un-ignore everything, then specifically ignore the listed folders
-            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n!*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n";
-            // Check if it already exists, create if not
-            try {
-                await fs.access(gitignorePath);
-                console.log(`[cloud-saves] ${gitignorePath} 文件已存在，跳过创建。`);
-            } catch (accessError) {
-                // File does not exist, create it
-                await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
-                console.log(`[cloud-saves] 已成功创建 ${gitignorePath}`);
-            }
+            // Keep .gitkeep visible, ignore common cache/upload dirs
+            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\\n*\\n\\n# Ignore specific subdirectories within data\\n_uploads/\\n_cache/\\n_storage/\\n_webpack/\\n\\n# Keep .gitkeep files visible to git\\n!.gitkeep\\n";
+            await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
+            console.log(`[cloud-saves] 已成功创建/更新主 ${gitignorePath}`);
         } catch (gitignoreError) {
-            console.error(`[cloud-saves] 创建 ${path.join(DATA_DIR, '.gitignore')} 文件失败:`, gitignoreError);
-            // Do not fail the whole init process for this, just log the error
+            console.error(`[cloud-saves] 创建主 ${path.join(DATA_DIR, '.gitignore')} 文件失败:`, gitignoreError);
         }
-        // --- END: Create .gitignore in data directory after init ---
-        
+        // --- END main .gitignore ---
+
+        // Note: No commit here, just preparation.
+
+        return { success: true, message: 'Git仓库初始化成功，嵌套的.git/.gitignore已移除，并添加了.gitkeep文件' };
     } catch (error) {
-        console.error(`[cloud-saves] 在${DATA_DIR}初始化git失败. 错误: ${error.message}`);
-        console.error('[cloud-saves] git init stdout on error:', error.stdout);
-        console.error('[cloud-saves] git init stderr on error:', error.stderr);
-        initResult = {
-            success: false,
-            message: '初始化Git仓库失败',
-            error: error.message,
-            stdout: error.stdout || '',
-            stderr: error.stderr || ''
-        };
+        return handleGitError(error, '初始化Git仓库');
     }
-
-    return initResult;
 }
 
-// 配置远程仓库
 async function configureRemote(repoUrl) {
-    // 检查当前远程仓库
-    const remoteResult = await runGitCommand('git remote -v');
-    
-    if (remoteResult.success && remoteResult.stdout.includes('origin')) {
-        // 如果已经有origin，更新它
-        const updateResult = await runGitCommand(`git remote set-url origin ${repoUrl}`);
-        if (!updateResult.success) {
-            return { success: false, message: '更新远程URL失败', details: updateResult };
+    try {
+        const git = await getGitInstance();
+        const remotes = await git.getRemotes(true);
+        const origin = remotes.find(r => r.name === 'origin');
+        
+        let authUrl = repoUrl;
+        const config = await readConfig();
+        if (repoUrl.startsWith('https://') && config.github_token && !repoUrl.includes('@')) {
+            authUrl = repoUrl.replace('https://', `https://x-access-token:${config.github_token}@`);
         }
-    } else {
-        // 否则添加origin
-        const addResult = await runGitCommand(`git remote add origin ${repoUrl}`);
-        if (!addResult.success) {
-            return { success: false, message: '添加远程仓库失败', details: addResult };
-        }
-    }
 
-    return { success: true, message: '远程仓库配置成功' };
+        if (origin) {
+            if (origin.refs.push !== authUrl) {
+                console.log('[cloud-saves] Updating remote origin URL.');
+                await git.remote(['set-url', 'origin', authUrl]);
+            }
+        } else {
+            console.log('[cloud-saves] Adding remote origin.');
+            await git.addRemote('origin', authUrl);
+        }
+        return { success: true, message: '远程仓库配置检查/更新成功' };
+    } catch (error) {
+        return handleGitError(error, '配置远程仓库');
+    }
 }
 
-// ========== 云存档特定功能 ==========
-
-// 创建新存档 - 修复推送和描述，使用 Base64 编码名称
 async function createSave(name, description) {
     try {
         currentOperation = 'create_save';
         console.log(`[cloud-saves] 正在创建新存档: ${name}, 描述: ${description}`);
-        
         const config = await readConfig();
-        const displayName = config.display_name || config.username || 'Cloud Saves User';
-        const placeholderEmail = 'cloud-saves@sillytavern.local';
-        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
-        const branchToPush = config.branch || DEFAULT_BRANCH; // 获取配置的分支
+        const git = await getGitInstance();
+        const branchToPush = config.branch || DEFAULT_BRANCH;
 
-        // 使用 Base64 URL 安全编码处理名称
         const encodedName = Buffer.from(name).toString('base64url');
         const tagName = `save_${Date.now()}_${encodedName}`;
-        
-        const addResult = await runGitCommand('git add -A');
-        if (!addResult.success) return { success: false, message: '添加文件到暂存区失败', details: addResult };
+        const nowTimestamp = new Date().toISOString();
+        const tagMessage = description || `存档: ${name}`;
+        const fullTagMessage = `${tagMessage}\nLast Updated: ${nowTimestamp}`;
 
-        const statusResult = await runGitCommand('git status --porcelain');
-        let commitNeeded = statusResult.success && statusResult.stdout.trim() !== '';
-        
+        await git.add('.');
+        const status = await git.status();
+        let commitNeeded = !status.isClean();
+
         if (commitNeeded) {
             console.log('[cloud-saves] 执行提交...');
-            const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "存档: ${name}"`);
-            if (!commitResult.success) {
-                if (commitResult.stderr && commitResult.stderr.includes('nothing to commit')) {
-                    console.log('[cloud-saves] 提交时无更改。');
-                    commitNeeded = false;
+            try {
+                await git.commit(`存档: ${name}`);
+            } catch (commitError) {
+                if (commitError.message.includes('nothing to commit')) {
+                     console.log('[cloud-saves] 提交时无更改。');
+                     commitNeeded = false;
                 } else {
-                    return { success: false, message: '提交更改失败', details: commitResult };
+                    throw commitError;
                 }
             }
         }
 
         console.log('[cloud-saves] 创建标签...');
-        const tagMessage = description || `存档: ${name}`; 
-        const nowTimestamp = new Date().toISOString();
-        const fullTagMessage = `${tagMessage}\nLast Updated: ${nowTimestamp}`;
-        console.log(`[cloud-saves] 用于创建标签的完整消息: "${fullTagMessage}"`);
-        const tagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${tagName}" -m "${fullTagMessage}"`);
-        if (!tagResult.success) return { success: false, message: '创建存档标签失败', details: tagResult };
+        await git.addAnnotatedTag(tagName, fullTagMessage);
 
         console.log('[cloud-saves] 推送更改...');
-        // --- BEGIN DETACHED HEAD PUSH FIX ---
-        // 检查是否处于 detached HEAD 状态
-        const symbolicRefResult = await runGitCommand('git symbolic-ref --short -q HEAD');
-        const isOnBranch = symbolicRefResult.success && symbolicRefResult.stdout.trim() !== '';
-        let currentBranch = '';
-        
-        if (isOnBranch) {
-             currentBranch = symbolicRefResult.stdout.trim();
-              // 只推送当前配置的分支上的提交
-              if (currentBranch === branchToPush && commitNeeded) {
-                 console.log(`[cloud-saves] 推送分支: ${currentBranch}`);
-                 const pushBranchResult = await runGitCommand(`git push origin ${currentBranch}`);
-                  if (!pushBranchResult.success) {
-                      console.warn(`[cloud-saves] 推送分支 ${currentBranch} 失败:`, pushBranchResult.stderr);
-                      // 可选：如果推送分支失败，可能不应该继续推送标签，取决于策略
-                      // return { success: false, message: `推送分支 ${currentBranch} 失败`, details: pushBranchResult };
-                  }
-              } else if (commitNeeded) {
-                  console.log(`[cloud-saves] 当前不在配置的分支 (${branchToPush})，跳过推送提交。当前分支: ${currentBranch}`);
-             }
-        } else {
-            console.log('[cloud-saves] 当前处于 detached HEAD 状态，跳过推送分支。');
+        const currentBranchStatus = await git.branch();
+        const currentBranch = currentBranchStatus.current;
+
+        if (commitNeeded && currentBranch === branchToPush && !currentBranchStatus.detached) {
+            console.log(`[cloud-saves] 推送分支: ${currentBranch}`);
+            try {
+                 await git.push('origin', currentBranch);
+            } catch (pushError) {
+                console.warn(`[cloud-saves] 推送分支 ${currentBranch} 失败:`, pushError.message);
+            }
+        } else if (commitNeeded) {
+             console.log(`[cloud-saves] 当前不在配置的分支 (${branchToPush}) 或处于 detached HEAD，跳过推送提交。当前: ${currentBranch || 'Detached'}`);
         }
-        // --- END DETACHED HEAD PUSH FIX ---
 
-        const pushTagResult = await runGitCommand(`git push origin "${tagName}"`);
-        if (!pushTagResult.success) return { success: false, message: '推送存档标签到远程失败', details: pushTagResult };
+        await git.push(['origin', tagName]);
 
-        config.last_save = { 
-            name: name, 
-            tag: tagName, 
+        config.last_save = {
+            name: name,
+            tag: tagName,
             timestamp: nowTimestamp,
-            description: description || '' 
+            description: description || ''
         };
         await saveConfig(config);
 
-        // 返回原始名称给前端
-        return { 
-            success: true, 
-            message: '存档创建成功', 
-            saveData: { 
-                ...config.last_save, 
-                name: name, 
+        return {
+            success: true,
+            message: '存档创建成功',
+            saveData: {
+                ...config.last_save,
+                name: name,
                 createdAt: nowTimestamp,
                 updatedAt: nowTimestamp
-            } 
+            }
         };
     } catch (error) {
-        console.error('[cloud-saves] 创建存档失败:', error);
-        return { success: false, message: `创建存档时发生错误: ${error.message}` };
+        return handleGitError(error, `创建存档 ${name}`);
     } finally {
         currentOperation = null;
     }
 }
 
-// 获取存档列表 - 获取并解码名称，获取 Tagger 名称
 async function listSaves() {
     try {
         currentOperation = 'list_saves';
         console.log('[cloud-saves] 获取存档列表');
-        
-        // Explicitly fetch from origin and force update local tags to match remote
-        const fetchResult = await runGitCommand('git fetch origin --tags --force'); 
-        if (!fetchResult.success) return { success: false, message: '从远程获取标签失败', details: fetchResult };
+        const git = await getGitInstance();
 
-        // 修改 format，添加 %(taggername) 和 %(contents) 获取完整 tag 消息体
+        await git.fetch(['origin', '--tags', '--force']);
+
         const formatString = "%(refname:short)%00%(creatordate:iso)%00%(taggername)%00%(subject)%00%(contents)";
-        const listTagsResult = await runGitCommand(`git tag -l "save_*" --sort=-creatordate --format="${formatString}"`);
-        if (!listTagsResult.success) return { success: false, message: '获取存档标签列表失败', details: listTagsResult };
+        const tagOutput = await git.raw('tag', '-l', 'save_*', '--sort=-creatordate', `--format=${formatString}`);
 
-        const saves = listTagsResult.stdout.trim().split('\n').filter(Boolean).map(line => {
+        if (!tagOutput) {
+             return { success: true, saves: [] };
+        }
+
+        const saves = tagOutput.trim().split('\n').filter(Boolean).map(line => {
             const parts = line.split('\0');
-            if (parts.length < 5) return null; 
-            
-            const tagName = parts[0];
-            const createdAt = new Date(parts[1]).toISOString(); // 创建时间
-            const taggerName = parts[2] || '未知'; 
-            const subject = parts[3]; // 第一行作为 subject
-            const body = parts[4] || ''; // 剩余部分作为 body
-            
-            let name = tagName;
-            let description = subject; // 默认描述是 subject
-            let updatedAt = createdAt; // 默认更新时间等于创建时间
+            if (parts.length < 5) return null;
 
-            // 尝试解析更新时间戳
+            const tagName = parts[0];
+            const createdAt = new Date(parts[1]).toISOString();
+            const taggerName = parts[2] || '未知';
+            const subject = parts[3];
+            const body = parts[4] || '';
+
+            let name = tagName;
+            let description = subject;
+            let updatedAt = createdAt;
+
             const bodyLines = body.split('\n');
             const lastUpdatedLine = bodyLines.find(l => l.startsWith('Last Updated:'));
             if (lastUpdatedLine) {
@@ -541,15 +431,10 @@ async function listSaves() {
                 if (!isNaN(parsedDate)) {
                     updatedAt = parsedDate.toISOString();
                 }
-                // 如果找到了更新时间戳，将它从描述中移除（或者只取第一行作描述）
-                // description = subject; // 只用 subject 作为描述比较简单
             } else {
-                 // 如果没有更新时间戳行，尝试将整个 contents 作为描述？
-                 // 或者只保留 subject
-                 description = subject; 
+                description = subject;
             }
-
-            // 解码名称
+            
             const tagNameMatch = tagName.match(/^save_\d+_(.+)$/);
             if (tagNameMatch) {
                 try {
@@ -557,14 +442,14 @@ async function listSaves() {
                     name = Buffer.from(encodedName, 'base64url').toString('utf8');
                 } catch (decodeError) {
                     console.warn(`[cloud-saves] 解码存档名称失败 (${tagName}):`, decodeError);
-                    name = tagNameMatch[1]; 
+                    name = tagNameMatch[1];
                 }
             }
 
             return {
                 name: name,
                 tag: tagName,
-                commit: null, 
+                commit: null,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 description: description.trim(),
@@ -574,120 +459,115 @@ async function listSaves() {
 
         return { success: true, saves: saves };
     } catch (error) {
-        console.error('[cloud-saves] 获取存档列表失败:', error);
-        return { success: false, message: `获取存档列表时发生错误: ${error.message}` };
+        return handleGitError(error, '获取存档列表');
     } finally {
         currentOperation = null;
     }
 }
 
-// 切换到指定存档
 async function loadSave(tagName) {
     try {
         currentOperation = 'load_save';
         console.log(`[cloud-saves] 正在加载存档: ${tagName}`);
-        
-        // 1. 检查标签是否存在
-        const checkTagResult = await runGitCommand(`git tag -l "${tagName}"`);
-        if (!checkTagResult.success || !checkTagResult.stdout.trim()) {
-            return { success: false, message: '找不到指定的存档', details: checkTagResult };
-        }
-
-        // 2. 在回档前保存当前工作区状态（如有必要）
-        const statusResult = await runGitCommand('git status --porcelain');
-        let stashCreated = false;
-        
-        if (statusResult.success && statusResult.stdout.trim() !== '') {
-            console.log('[cloud-saves] 检测到未保存的更改，在回档前创建临时保存点');
-            
-            // 创建临时存档
-            const tempStashResult = await runGitCommand('git stash push -u -m "Temporary stash before loading save"');
-            stashCreated = tempStashResult.success && !tempStashResult.stdout.includes('No local changes to save');
-            
-            if (stashCreated) {
-                console.log('[cloud-saves] 临时保存点创建成功');
-            } else {
-                console.warn('[cloud-saves] 创建临时保存点失败或没有更改需要保存');
-            }
-        }
-
-        // 3. 获取标签指向的提交
-        const tagCommitResult = await runGitCommand(`git rev-list -n 1 "${tagName}"`);
-        if (!tagCommitResult.success) {
-            // 如果失败且之前创建了stash，尝试应用stash
-            if (stashCreated) {
-                await runGitCommand('git stash pop');
-            }
-            return { success: false, message: '获取存档提交失败', details: tagCommitResult };
-        }
-        
-        const commit = tagCommitResult.stdout.trim();
-
-        // 4. 切换到标签指向的提交 (这会进入 detached HEAD 状态)
-        const checkoutResult = await runGitCommand(`git checkout "${commit}"`);
-        if (!checkoutResult.success) {
-            // 如果失败且之前创建了stash，尝试应用stash
-            if (stashCreated) {
-                await runGitCommand('git stash pop');
-            }
-            return { success: false, message: '切换到存档失败', details: checkoutResult };
-        }
-
-        // 5. 更新配置记录当前加载的存档
+        const git = await getGitInstance();
         const config = await readConfig();
+
+        await git.fetch(['origin', '--tags']);
+        const tags = await git.tags(['-l', tagName]);
+        if (!tags || !tags.all.includes(tagName)) {
+            return { success: false, message: '找不到指定的存档标签' };
+        }
+
+        const status = await git.status();
+        let stashCreated = false;
+        if (!status.isClean()) {
+            console.log('[cloud-saves] 检测到未保存的更改，在回档前创建临时保存点');
+            const stashResult = await git.stash(['push', '-u', '-m', 'Temporary stash before loading save']);
+            stashCreated = stashResult && !stashResult.includes('No local changes to save');
+             if (stashCreated) {
+                 console.log('[cloud-saves] 临时保存点创建成功');
+                 config.has_temp_stash = true;
+             } else {
+                 console.warn('[cloud-saves] 创建临时保存点失败或没有更改需要保存');
+                 config.has_temp_stash = false;
+             }
+        } else {
+             config.has_temp_stash = false;
+        }
+        
+        const commit = await git.revparse([tagName]);
+        if (!commit) {
+            if(stashCreated) await git.stash(['pop']);
+             return { success: false, message: '获取存档提交哈希失败' };
+        }
+
+        await git.checkout(commit);
+
         config.current_save = {
             tag: tagName,
             loaded_at: new Date().toISOString()
         };
-        if (stashCreated) {
-            config.has_temp_stash = true;
-        }
         await saveConfig(config);
 
-        return { 
-            success: true, 
-            message: '存档加载成功', 
-            stashCreated: stashCreated 
+        return {
+            success: true,
+            message: '存档加载成功',
+            stashCreated: stashCreated
         };
     } catch (error) {
-        console.error('[cloud-saves] 加载存档失败:', error);
-        return { success: false, message: `加载存档时发生错误: ${error.message}` };
+        try {
+            const cfg = await readConfig();
+            if (cfg.has_temp_stash) {
+                const git = await getGitInstance();
+                console.warn("[cloud-saves] Load failed, attempting to pop temporary stash...");
+                await git.stash(['pop']);
+                cfg.has_temp_stash = false;
+                await saveConfig(cfg);
+                console.warn("[cloud-saves] Temporary stash popped after load failure.");
+            }
+        } catch (popError) {
+              console.error("[cloud-saves] Failed to pop temporary stash after load error:", popError);
+        }
+        return handleGitError(error, `加载存档 ${tagName}`);
     } finally {
         currentOperation = null;
     }
 }
 
-// 删除存档
 async function deleteSave(tagName) {
     try {
         currentOperation = 'delete_save';
         console.log(`[cloud-saves] 正在删除存档: ${tagName}`);
-        
-        // 1. 检查标签是否存在
-        const checkTagResult = await runGitCommand(`git tag -l "${tagName}"`);
-        if (!checkTagResult.success || !checkTagResult.stdout.trim()) {
-            return { success: false, message: '找不到指定的存档', details: checkTagResult };
+        const git = await getGitInstance();
+
+        await git.tag(['-d', tagName]);
+        console.log(`[cloud-saves] 本地标签 ${tagName} 已删除 (或不存在)`);
+
+        let remoteDeleteSuccess = false;
+        try {
+            await git.push(['origin', `:refs/tags/${tagName}`]);
+            console.log(`[cloud-saves] 远程标签 ${tagName} 已删除`);
+            remoteDeleteSuccess = true;
+        } catch (pushError) {
+            if (pushError.message.includes('remote ref does not exist') || pushError.message.includes('deletion of') ) {
+                console.log(`[cloud-saves] 远程标签 ${tagName} 不存在或已被删除`);
+                remoteDeleteSuccess = true;
+            } else {
+                 console.warn(`[cloud-saves] 删除远程标签 ${tagName} 失败:`, pushError.message);
+                 const config = await readConfig();
+                 if (config.current_save && config.current_save.tag === tagName) {
+                     config.current_save = null;
+                     await saveConfig(config);
+                 }
+                 return {
+                     success: true,
+                     message: '本地存档已删除，但删除远程存档失败，可能是网络问题或权限问题',
+                     warning: true,
+                     details: pushError.message
+                 };
+            }
         }
 
-        // 2. 删除本地标签
-        const deleteLocalResult = await runGitCommand(`git tag -d "${tagName}"`);
-        if (!deleteLocalResult.success) {
-            return { success: false, message: '删除本地存档失败', details: deleteLocalResult };
-        }
-
-        // 3. 删除远程标签
-        const deleteRemoteResult = await runGitCommand(`git push origin :refs/tags/${tagName}`);
-        if (!deleteRemoteResult.success) {
-            console.warn('[cloud-saves] 删除远程存档标签失败，但本地已删除:', deleteRemoteResult.stderr);
-            return { 
-                success: true, 
-                message: '本地存档已删除，但删除远程存档失败，可能是网络问题或权限问题',
-                warning: true,
-                details: deleteRemoteResult
-            };
-        }
-
-        // 4. 更新配置，如果当前加载的存档被删除，清除记录
         const config = await readConfig();
         if (config.current_save && config.current_save.tag === tagName) {
             config.current_save = null;
@@ -696,160 +576,132 @@ async function deleteSave(tagName) {
 
         return { success: true, message: '存档删除成功' };
     } catch (error) {
-        console.error('[cloud-saves] 删除存档失败:', error);
-        return { success: false, message: `删除存档时发生错误: ${error.message}` };
+        return handleGitError(error, `删除存档 ${tagName}`);
     } finally {
         currentOperation = null;
     }
 }
 
-// 重命名存档 - 使用 Base64 编码新名称
 async function renameSave(oldTagName, newName, description) {
     try {
         currentOperation = 'rename_save';
         console.log(`[cloud-saves] 正在重命名存档: ${oldTagName} -> ${newName}`);
-        
+        const git = await getGitInstance();
         const config = await readConfig();
-        const displayName = config.display_name || config.username || 'Cloud Saves User';
-        const placeholderEmail = 'cloud-saves@sillytavern.local';
-        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
 
-        // 1. 检查旧标签是否存在
-        const checkTagResult = await runGitCommand(`git tag -l "${oldTagName}"`);
-        if (!checkTagResult.success || !checkTagResult.stdout.trim()) return { success: false, message: '找不到指定的存档', details: checkTagResult };
+        const tags = await git.tags(['-l', oldTagName]);
+         if (!tags || !tags.all.includes(oldTagName)) {
+             return { success: false, message: '找不到指定的存档标签' };
+         }
+        const commit = await git.revparse([oldTagName]);
+        if (!commit) return { success: false, message: '获取存档提交失败' };
 
-        // 2. 获取旧标签指向的提交
-        const tagCommitResult = await runGitCommand(`git rev-list -n 1 "${oldTagName}"`);
-        if (!tagCommitResult.success) return { success: false, message: '获取存档提交失败', details: tagCommitResult };
-        const commit = tagCommitResult.stdout.trim();
-
-        // 3. 解码旧名称以供比较
         let oldDecodedName = oldTagName;
         const oldNameMatch = oldTagName.match(/^save_\d+_(.+)$/);
         if (oldNameMatch) {
-             try { oldDecodedName = Buffer.from(oldNameMatch[1], 'base64url').toString('utf8'); } catch (e) { /* ignore */ }
+            try { oldDecodedName = Buffer.from(oldNameMatch[1], 'base64url').toString('utf8'); } catch (e) { /* ignore */ }
         }
-        
+
         const nowTimestamp = new Date().toISOString();
-        const newDescription = description || `存档: ${newName}`; // 使用传入的描述或默认
+        const newDescription = description || `存档: ${newName}`;
         const fullNewMessage = `${newDescription}\nLast Updated: ${nowTimestamp}`;
 
-        // 4. 检查名称是否实际更改
         if (oldDecodedName === newName) {
-            // 名称未变，只更新描述和更新时间戳
             console.log(`[cloud-saves] 名称未变，仅更新标签描述和时间戳: ${oldTagName}`);
-            // 使用 -f 强制更新本地标签
-            const updateTagResult = await runGitCommand(`git ${gitConfigArgs} tag -a -f "${oldTagName}" -m "${fullNewMessage}" ${commit}`);
-            if (!updateTagResult.success) {
-                return { success: false, message: '更新本地标签失败', details: updateTagResult };
-            }
-            // 强制推送更新后的标签到远程
-            console.log(`[cloud-saves] 强制推送更新后的标签: ${oldTagName}`);
-            const forcePushResult = await runGitCommand(`git push origin "${oldTagName}" --force`);
-            if (!forcePushResult.success) {
-                // 如果强制推送失败，可能需要警告用户或尝试回滚本地更改？
-                console.warn(`[cloud-saves] 强制推送标签 ${oldTagName} 失败，远程可能未更新:`, forcePushResult.stderr);
-                return { success: false, message: '强制推送更新后的标签失败，请检查权限或网络', details: forcePushResult, warning: true };
-            }
-            // 返回成功，但 newTag 和 newName 保持不变
-            return { success: true, message: '存档描述和更新时间已更新', oldTag: oldTagName, newTag: oldTagName, newName: newName };
-
+            await git.tag(['-a', '-f', oldTagName, '-m', fullNewMessage, commit]);
+            await git.push(['origin', oldTagName, '--force']);
+             return { success: true, message: '存档描述和更新时间已更新', oldTag: oldTagName, newTag: oldTagName, newName: newName };
         } else {
-            // 名称已更改，执行完整的重命名流程
-            console.log(`[cloud-saves] 名称已更改，执行完整重命名流程...`);
-        // 使用 Base64 编码新名称
-        const encodedNewName = Buffer.from(newName).toString('base64url');
-            // 使用当前时间戳创建新标签名，而不是旧的
-            const newTagName = `save_${Date.now()}_${encodedNewName}`; 
+             console.log(`[cloud-saves] 名称已更改，执行完整重命名流程...`);
+             const encodedNewName = Buffer.from(newName).toString('base64url');
+             const newTagName = `save_${Date.now()}_${encodedNewName}`;
 
-            console.log(`[cloud-saves] 创建新标签: ${newTagName}`);
-            const tagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${newTagName}" -m "${fullNewMessage}" ${commit}`);
-        if (!tagResult.success) return { success: false, message: '创建新存档标签失败', details: tagResult };
+             console.log(`[cloud-saves] 创建新标签: ${newTagName}`);
+             await git.addAnnotatedTag(newTagName, fullNewMessage, commit);
 
-            console.log(`[cloud-saves] 推送新标签: ${newTagName}`);
-        const pushTagResult = await runGitCommand(`git push origin "${newTagName}"`);
-        if (!pushTagResult.success) {
-                // 如果推送失败，删除本地创建的新标签
-            await runGitCommand(`git tag -d "${newTagName}"`);
-            return { success: false, message: '推送新存档标签到远程失败', details: pushTagResult };
+             console.log(`[cloud-saves] 推送新标签: ${newTagName}`);
+             try {
+                await git.push('origin', newTagName);
+             } catch (pushError) {
+                  await git.tag(['-d', newTagName]);
+                  throw pushError;
+             }
+
+             console.log(`[cloud-saves] 删除旧本地标签: ${oldTagName}`);
+             await git.tag(['-d', oldTagName]);
+
+             console.log(`[cloud-saves] 删除旧远程标签: ${oldTagName}`);
+             try {
+                 await git.push(['origin', `:refs/tags/${oldTagName}`]);
+             } catch(deleteRemoteError) {
+                  if (!deleteRemoteError.message.includes('remote ref does not exist')) {
+                      console.warn(`[cloud-saves] 删除旧远程标签 ${oldTagName} 失败:`, deleteRemoteError.message);
+                  }
+             }
+
+            if (config.current_save && config.current_save.tag === oldTagName) {
+                config.current_save.tag = newTagName;
+                await saveConfig(config);
+            }
+
+            return { success: true, message: '存档重命名成功', oldTag: oldTagName, newTag: newTagName, newName: newName };
         }
-
-            console.log(`[cloud-saves] 删除旧本地标签: ${oldTagName}`);
-            await runGitCommand(`git tag -d "${oldTagName}"`); // 忽略本地删除错误
-            console.log(`[cloud-saves] 删除旧远程标签: ${oldTagName}`);
-            await runGitCommand(`git push origin :refs/tags/${oldTagName}`); // 忽略远程删除错误
-
-            // 更新配置中的 current_save (如果适用)
-        if (config.current_save && config.current_save.tag === oldTagName) {
-            config.current_save.tag = newTagName;
-            await saveConfig(config);
-        }
-
-        // 返回原始新名称给前端
-        return { success: true, message: '存档重命名成功', oldTag: oldTagName, newTag: newTagName, newName: newName };
-        }
-
     } catch (error) {
-        console.error('[cloud-saves] 重命名存档失败:', error);
-        return { success: false, message: `重命名存档时发生错误: ${error.message}` };
+        return handleGitError(error, `重命名存档 ${oldTagName} -> ${newName}`);
     } finally {
         currentOperation = null;
     }
 }
 
-// 获取存档之间的差异 - 改进引用验证
-async function getSaveDiff(ref1, ref2) { // 参数名改为 ref1, ref2
+async function getSaveDiff(ref1, ref2) {
     try {
         currentOperation = 'get_save_diff';
         console.log(`[cloud-saves] 获取差异: ${ref1} <-> ${ref2}`);
-        
-        // 1. 使用 git rev-parse 验证引用有效性
-        const checkRef1Result = await runGitCommand(`git rev-parse --verify ${ref1}`);
-        if (!checkRef1Result.success) {
-            // 尝试处理特殊空树对象，用于与初始提交比较
-            if (ref1 !== '4b825dc642cb6eb9a060e54bf8d69288fbee4904') {
-                 // 特别处理 tag^ 可能在初始提交时无效的情况
-                 if (ref1.endsWith('^') || ref1.endsWith('~1')) {
-                     console.warn(`[cloud-saves] 无法解析引用 ${ref1}，可能为初始提交的父提交。尝试与空树比较。`);
-                     ref1 = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; // Git 的空树对象哈希
-                 } else {
-                    return { success: false, message: `找不到或无效的引用: ${ref1}`, details: checkRef1Result };
-                 }
-            } 
+        const git = simpleGit(DATA_DIR);
+        const emptyTreeHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+        try {
+            await git.revparse(['--verify', ref1]);
+        } catch (error) {
+            if ((ref1.endsWith('^') || ref1.endsWith('~1')) && error.message.includes('unknown revision')) {
+                console.warn(`[cloud-saves] 无法解析引用 ${ref1}，可能为初始提交的父提交。尝试与空树比较。`);
+                ref1 = emptyTreeHash;
+            } else if (ref1 === emptyTreeHash) {
+                
+            }
+            else {
+                 return { success: false, message: `找不到或无效的引用: ${ref1}`, details: error.message };
+            }
+        }
+        try {
+            await git.revparse(['--verify', ref2]);
+        } catch (error) {
+             return { success: false, message: `找不到或无效的引用: ${ref2}`, details: error.message };
         }
 
-        const checkRef2Result = await runGitCommand(`git rev-parse --verify ${ref2}`);
-        if (!checkRef2Result.success) {
-             return { success: false, message: `找不到或无效的引用: ${ref2}`, details: checkRef2Result };
-        }
-
-        // 2. 获取变更文件列表 (git diff 可以处理各种有效引用)
-        const diffNameOnlyResult = await runGitCommand(`git diff --name-status ${ref1} ${ref2}`);
-        if (!diffNameOnlyResult.success) {
-            // 如果 diff 失败，检查是否因为 ref1 指向空树 (初始提交对比)
-             if (ref1 === '4b825dc642cb6eb9a060e54bf8d69288fbee4904') {
-                 console.log(`[cloud-saves] 与空树比较，使用 git show 显示初始提交内容。`);
-                 // 对于初始提交，显示其包含的所有文件作为"添加"
-                 const showResult = await runGitCommand(`git show --pretty="format:" --name-status ${ref2}`);
-                 if (showResult.success) {
-                     const files = showResult.stdout.trim().split('\n').filter(Boolean).map(line => {
-                        const [status, ...fileParts] = line.split('\t');
-                        return { status: 'A', fileName: fileParts.join('\t') }; // 将所有文件视为添加 A
-                     });
-                     return { success: true, changedFiles: files };
-                 } else {
-                    return { success: false, message: '获取初始提交文件列表失败', details: showResult };
-                 }
+        let diffOutput;
+         try {
+             if (ref1 === emptyTreeHash) {
+                  console.log(`[cloud-saves] 与空树比较 (${ref2})，使用 'git ls-tree' 显示初始提交内容。`);
+                 const lsTreeOutput = await git.raw('ls-tree', '-r', '--name-only', ref2);
+                 if (!lsTreeOutput) return { success: true, changedFiles: [] };
+                 changedFiles = lsTreeOutput.trim().split('\n').filter(Boolean).map(fileName => ({
+                     status: 'A',
+                     fileName: fileName
+                 }));
+                 return { success: true, changedFiles: changedFiles };
              } else {
-                return { success: false, message: '获取变更文件列表失败', details: diffNameOnlyResult };
+                 diffOutput = await git.diff(['--name-status', ref1, ref2]);
              }
-        }
-        
-        const changedFiles = diffNameOnlyResult.stdout.trim().split('\n')
+         } catch (diffError) {
+              return handleGitError(diffError, `获取差异 ${ref1} <-> ${ref2}`);
+         }
+
+        const changedFiles = diffOutput.trim().split('\n')
             .filter(Boolean)
             .map(line => {
-                const [status, ...fileParts] = line.split('\t');
-                const fileName = fileParts.join('\t');
+                const [status, ...fileParts] = line.split(/\s+/);
+                const fileName = fileParts.join(' ');
                 return { status, fileName };
             });
 
@@ -858,220 +710,255 @@ async function getSaveDiff(ref1, ref2) { // 参数名改为 ref1, ref2
             changedFiles: changedFiles
         };
     } catch (error) {
-        console.error('[cloud-saves] 获取存档差异失败:', error);
-        return { success: false, message: `获取存档差异时发生错误: ${error.message}` };
+        return handleGitError(error, `获取存档差异 ${ref1} <-> ${ref2}`);
     } finally {
         currentOperation = null;
     }
 }
 
-// 获取Git状态
 async function getGitStatus() {
     try {
-        const isInitializedResult = await runGitCommand('git rev-parse --is-inside-work-tree');
-        const isInitialized = isInitializedResult.success && isInitializedResult.stdout.trim() === 'true';
-        
-        let changes = [];
+        const git = simpleGit(DATA_DIR);
+        const isInitialized = await isGitInitialized();
+
+        let status = null;
         if (isInitialized) {
-            const statusResult = await runGitCommand('git status --porcelain');
-            // 检查成功后再处理stdout
-            if (statusResult.success && typeof statusResult.stdout === 'string') { 
-                changes = statusResult.stdout.trim().split('\n').filter(line => line.trim() !== '');
-            } else if (!statusResult.success) {
-                // 如果获取状态失败（在已初始化的仓库上），记录错误
-                console.error('获取git状态失败:', statusResult.stderr || statusResult.error);
-                throw new Error(`获取Git状态失败: ${statusResult.stderr || statusResult.error}`);
-            }
-        }
-        
-        // 获取当前分支信息
-        let currentBranch = null;
-        const branchResult = await runGitCommand('git branch --show-current');
-        if (branchResult.success) {
-            currentBranch = branchResult.stdout.trim();
+            status = await git.status();
         }
 
-        // 获取当前存档信息
+        let currentBranch = null;
+        let isDetached = false;
+        if (isInitialized) {
+             try {
+                 const branchSummary = await git.branch();
+                 currentBranch = branchSummary.current;
+                 isDetached = branchSummary.detached;
+             } catch (branchError) {
+                  console.warn('[cloud-saves] 获取分支信息失败:', branchError.message);
+             }
+        }
+
         const config = await readConfig();
         const currentSave = config.current_save;
 
-        return { 
-            initialized: isInitialized, 
-            changes: changes,
-            currentBranch: currentBranch,
-            currentSave: currentSave
+        const formattedStatus = {
+             initialized: isInitialized,
+             changes: status ? status.files.map(f => `${f.working_dir}${f.index} ${f.path}`) : [],
+             currentBranch: isDetached ? null : currentBranch,
+             currentSave: currentSave,
+             isDetached: isDetached,
+             ahead: status ? status.ahead : 0,
+             behind: status ? status.behind : 0,
         };
+        
+        return formattedStatus;
+
     } catch (error) {
         console.error('获取Git状态时出错:', error);
-        throw error;
+        throw handleGitError(error, '获取Git状态');
     }
 }
 
-// 检查是否有尚未保存的更改
 async function hasUnsavedChanges() {
-    const statusResult = await runGitCommand('git status --porcelain');
-    return statusResult.success && statusResult.stdout.trim() !== '';
+    try {
+        const git = simpleGit(DATA_DIR);
+        if (!await isGitInitialized()) return false;
+        const status = await git.status();
+        return !status.isClean();
+    } catch (error) {
+         console.error('[cloud-saves]检查未保存更改时出错:', error);
+         return false;
+    }
 }
 
-// 检查用户临时stash是否存在
 async function checkTempStash() {
     const config = await readConfig();
     if (!config.has_temp_stash) {
         return { exists: false };
     }
-    
-    // 检查stash列表
-    const stashListResult = await runGitCommand('git stash list');
-    if (!stashListResult.success) {
-        return { exists: false, error: 'Failed to check stash list' };
+
+    try {
+        const git = simpleGit(DATA_DIR);
+        const stashList = await git.stashList();
+
+        if (stashList.total === 0) {
+            config.has_temp_stash = false;
+            await saveConfig(config);
+            return { exists: false };
+        }
+        const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
+         if (!tempStash) {
+            config.has_temp_stash = false;
+            await saveConfig(config);
+            return { exists: false };
+         }
+
+        return { exists: true };
+    } catch (error) {
+        console.error('[cloud-saves] Error checking stash list:', error);
+        return { exists: config.has_temp_stash, error: 'Failed to check stash list' };
     }
-    
-    // 查找临时stash（假设是第一个，但更严格的实现应该检查stash消息）
-    const stashes = stashListResult.stdout.trim().split('\n').filter(Boolean);
-    if (stashes.length === 0) {
-        // 没有找到stash，更新配置
-        config.has_temp_stash = false;
-        await saveConfig(config);
-        return { exists: false };
-    }
-    
-    return { exists: true };
 }
 
-// 应用临时stash
 async function applyTempStash() {
     const config = await readConfig();
     if (!config.has_temp_stash) {
-        return { success: false, message: 'No temporary stash found' };
+        return { success: false, message: 'No temporary stash found in config' };
     }
-    
-    // 应用stash（假设是stash@{0}，严格实现应该基于消息找到正确的stash）
-    const stashApplyResult = await runGitCommand('git stash apply stash@{0}');
-    if (!stashApplyResult.success) {
-        return { success: false, message: 'Failed to apply stash', details: stashApplyResult };
+
+    try {
+        const git = simpleGit(DATA_DIR);
+        const stashList = await git.stashList();
+         const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
+        if (!tempStash) {
+            config.has_temp_stash = false;
+            await saveConfig(config);
+             return { success: false, message: 'Temporary stash entry not found in stash list' };
+        }
+        
+        const stashRef = tempStash.name;
+
+        console.log(`[cloud-saves] Applying temporary stash: ${stashRef}`);
+        await git.stash(['apply', stashRef]);
+
+        console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
+        await git.stash(['drop', stashRef]);
+
+
+        config.has_temp_stash = false;
+        await saveConfig(config);
+
+        return { success: true, message: 'Temporary stash applied and dropped successfully' };
+    } catch (error) {
+        return handleGitError(error, '应用临时Stash');
     }
-    
-    // 更新配置
-    config.has_temp_stash = false;
-    await saveConfig(config);
-    
-    return { success: true, message: 'Temporary stash applied successfully' };
 }
 
-// 丢弃临时stash
 async function discardTempStash() {
     const config = await readConfig();
     if (!config.has_temp_stash) {
-        return { success: false, message: 'No temporary stash found' };
+        return { success: false, message: 'No temporary stash found in config' };
     }
-    
-    // 丢弃stash（假设是stash@{0}）
-    const stashDropResult = await runGitCommand('git stash drop stash@{0}');
-    if (!stashDropResult.success) {
-        return { success: false, message: 'Failed to discard stash', details: stashDropResult };
+
+    try {
+        const git = simpleGit(DATA_DIR);
+        const stashList = await git.stashList();
+        const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
+        if (!tempStash) {
+             config.has_temp_stash = false;
+             await saveConfig(config);
+             return { success: true, message: 'Temporary stash entry not found in stash list (already gone)' };
+        }
+        
+        const stashRef = tempStash.name;
+
+        console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
+        await git.stash(['drop', stashRef]);
+
+        config.has_temp_stash = false;
+        await saveConfig(config);
+
+        return { success: true, message: 'Temporary stash discarded' };
+    } catch (error) {
+        return handleGitError(error, '丢弃临时Stash');
     }
-    
-    // 更新配置
-    config.has_temp_stash = false;
-    await saveConfig(config);
-    
-    return { success: true, message: 'Temporary stash discarded' };
 }
 
-// --- 新增：执行自动覆盖存档的函数 (供定时器调用) ---
 async function performAutoSave() {
     if (currentOperation) {
         console.log(`[Cloud Saves Auto] 跳过自动存档，当前有操作正在进行: ${currentOperation}`);
         return;
     }
-    currentOperation = 'auto_save'; // 标记操作开始
+    currentOperation = 'auto_save';
     let config;
+    let git;
     try {
         config = await readConfig();
         if (!config.is_authorized || !config.autoSaveEnabled || !config.autoSaveTargetTag) {
-            console.log('[Cloud Saves Auto] 自动存档条件不满足（未授权/未启用/无目标），跳过。');
+            console.log('[Cloud Saves Auto] 自动存档条件不满足，跳过。');
             currentOperation = null;
             return;
         }
-        
+
         const targetTag = config.autoSaveTargetTag;
         console.log(`[Cloud Saves Auto] 开始自动覆盖存档到: ${targetTag}`);
-        
-        // --- 复用 /overwrite 接口的核心逻辑 --- 
-        // (注意：这里不处理 res 对象，只执行操作或抛出错误)
-        
-        let originalDescription = `Overwrite of ${targetTag}`;
-        const fetchTagInfoResult = await runGitCommand(`git tag -n1 -l "${targetTag}" --format="%(contents)"`);
-        if (fetchTagInfoResult.success && fetchTagInfoResult.stdout.trim()) {
-            originalDescription = fetchTagInfoResult.stdout.trim().split('\n')[0];
-        }
-        const displayName = config.display_name || config.username || 'Cloud Saves User';
-        const placeholderEmail = 'cloud-saves@sillytavern.local';
-        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
+        git = await getGitInstance();
         const branchToUse = config.branch || DEFAULT_BRANCH;
 
-        const addResult = await runGitCommand('git add -A');
-        if (!addResult.success) throw new Error(`添加到暂存区失败: ${addResult.stderr}`);
+        let originalDescription = `Auto Save Overwrite: ${targetTag}`;
+        try {
+             const tagInfoRaw = await git.raw('tag', '-n1', '-l', targetTag, '--format=%(contents)');
+             if (tagInfoRaw) {
+                 originalDescription = tagInfoRaw.trim().split('\n')[0];
+             }
+        } catch (tagInfoError) {
+             console.warn(`[Cloud Saves Auto] 获取旧标签 ${targetTag} 信息失败，将使用默认描述。`, tagInfoError.message);
+        }
 
-        const statusResult = await runGitCommand('git status --porcelain');
-        const hasChanges = statusResult.success && statusResult.stdout.trim() !== '';
-        let newCommitHash = 'HEAD';
+        await git.add('.');
+        const status = await git.status();
+        const hasChanges = !status.isClean();
+        let newCommitHash;
 
         if (hasChanges) {
             const commitMessage = `Auto Save Overwrite: ${targetTag}`;
-            const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
-            if (!commitResult.success) {
-                if (commitResult.stderr && commitResult.stderr.includes('nothing to commit')) {
-                    console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
-                     const headCommitResult = await runGitCommand('git rev-parse HEAD');
-                     if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-                     newCommitHash = headCommitResult.stdout.trim();
-                } else {
-                    throw new Error(`创建自动存档提交失败: ${commitResult.stderr}`);
-                }
-            } else {
-                 const newCommitResult = await runGitCommand('git rev-parse HEAD');
-                 if (!newCommitResult.success) throw new Error('获取新提交哈希失败');
-                 newCommitHash = newCommitResult.stdout.trim();
+            try {
+                const commitResult = await git.commit(commitMessage);
+                 newCommitHash = commitResult.commit;
                  console.log('[Cloud Saves Auto] 新自动存档提交哈希:', newCommitHash);
-                 const pushCommitResult = await runGitCommand(`git push origin ${branchToUse}`);
-                 if (!pushCommitResult.success) console.warn(`[Cloud Saves Auto] 推送自动存档提交到分支 ${branchToUse} 失败:`, pushCommitResult.stderr);
+                try {
+                    await git.push('origin', branchToUse);
+                } catch (pushCommitError) {
+                    console.warn(`[Cloud Saves Auto] 推送自动存档提交到分支 ${branchToUse} 失败:`, pushCommitError.message);
+                }
+            } catch (commitError) {
+                if (commitError.message.includes('nothing to commit')) {
+                    console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
+                    newCommitHash = await git.revparse('HEAD');
+                } else {
+                     throw commitError;
+                }
             }
         } else {
-             console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
-             const headCommitResult = await runGitCommand('git rev-parse HEAD');
-             if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-             newCommitHash = headCommitResult.stdout.trim();
+            console.log('[Cloud Saves Auto] 自动存档时无实际更改可提交，将使用当前 HEAD');
+            newCommitHash = await git.revparse('HEAD');
         }
 
-        await runGitCommand(`git tag -d "${targetTag}"`);
-        const deleteRemoteResult = await runGitCommand(`git push origin :refs/tags/${targetTag}`);
-        if (!deleteRemoteResult.success && !deleteRemoteResult.stderr.includes('remote ref does not exist')) {
-           console.warn(`[Cloud Saves Auto] 删除远程旧标签 ${targetTag} 时遇到问题:`, deleteRemoteResult.stderr);
+        if (!newCommitHash) {
+            throw new Error('无法确定用于自动存档的提交哈希');
+        }
+
+        try {
+             await git.tag(['-d', targetTag]);
+        } catch (delLocalErr) { /* Ignore if local doesn't exist */ }
+        try {
+            await git.push(['origin', `:refs/tags/${targetTag}`]);
+        } catch (delRemoteErr) {
+            if (!delRemoteErr.message.includes('remote ref does not exist')) {
+                 console.warn(`[Cloud Saves Auto] 删除远程旧标签 ${targetTag} 时遇到问题:`, delRemoteErr.message);
+            }
         }
 
         const nowTimestampOverwrite = new Date().toISOString();
         const fullTagMessageOverwrite = `${originalDescription}\nLast Updated: ${nowTimestampOverwrite}`;
-        const newTagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${targetTag}" -m "${fullTagMessageOverwrite}" ${newCommitHash}`);
-        if (!newTagResult.success) throw new Error(`创建新标签 ${targetTag} 失败: ${newTagResult.stderr}`);
+        await git.addAnnotatedTag(targetTag, fullTagMessageOverwrite, newCommitHash);
 
-        const pushNewTagResult = await runGitCommand(`git push origin "${targetTag}"`);
-        if (!pushNewTagResult.success) {
-            await runGitCommand(`git tag -d "${targetTag}"`);
-           throw new Error(`推送新标签 ${targetTag} 到远程失败: ${pushNewTagResult.stderr}`);
+        try {
+             await git.push('origin', targetTag);
+        } catch (pushTagError) {
+             await git.tag(['-d', targetTag]);
+             throw pushTagError;
         }
 
-        // 不需要更新 last_save，让用户手动操作的 last_save 保持
         console.log(`[Cloud Saves Auto] 成功自动覆盖存档: ${targetTag}`);
 
     } catch (error) {
         console.error(`[Cloud Saves Auto] 自动覆盖存档失败 (${config?.autoSaveTargetTag}):`, error);
     } finally {
-        currentOperation = null; // 释放操作状态
+        currentOperation = null;
     }
 }
 
-// --- 新增：设置/清除后端定时器的函数 ---
 function setupBackendAutoSaveTimer() {
     if (autoSaveBackendTimer) {
         console.log('[Cloud Saves] 清除现有的后端自动存档定时器。');
@@ -1083,6 +970,10 @@ function setupBackendAutoSaveTimer() {
         if (config.is_authorized && config.autoSaveEnabled && config.autoSaveTargetTag) {
             const intervalMinutes = config.autoSaveInterval > 0 ? config.autoSaveInterval : 30;
             const intervalMilliseconds = intervalMinutes * 60 * 1000;
+            if (intervalMilliseconds < 60000) {
+                 console.warn(`[Cloud Saves] 自动存档间隔 (${intervalMinutes}分钟) 过短，已调整为最少 1 分钟。`);
+                 intervalMilliseconds = 60000;
+            }
             console.log(`[Cloud Saves] 启动后端定时存档，间隔 ${intervalMinutes} 分钟，目标: ${config.autoSaveTargetTag}`);
             autoSaveBackendTimer = setInterval(performAutoSave, intervalMilliseconds);
         } else {
@@ -1093,49 +984,34 @@ function setupBackendAutoSaveTimer() {
     });
 }
 
-// ========== 插件初始化和导出 ==========
-
 async function init(router) {
-    console.log('[cloud-saves] 初始化云存档插件...');
-    // Add this line with the full default URL and reminder
-    console.log('[cloud-saves] 插件 UI 访问地址 (如果端口不是8000请自行修改): http://127.0.0.1:8000/api/plugins/cloud-saves/ui'); 
+    console.log('[cloud-saves] 初始化云存档插件 (simple-git)...');
+    console.log('[cloud-saves] 插件 UI 访问地址 (如果端口不是8000请自行修改): http://127.0.0.1:8000/api/plugins/cloud-saves/ui');
+
     try {
-        // --- BEGIN UI Serving --- 
-        // 提供静态文件 - 修改路径为 /static
         router.use('/static', express.static(path.join(__dirname, 'public')));
-
-        // 确保解析JSON请求体
         router.use(express.json());
-
-        // UI页面路由
         router.get('/ui', (req, res) => {
             res.sendFile(path.join(__dirname, 'public', 'index.html'));
         });
-        // --- END UI Serving ---
 
-        // ========== Express API 端点 ==========
-
-        // 获取插件信息
         router.get('/info', (req, res) => {
             res.json(info);
         });
 
-        // 获取配置
         router.get('/config', async (req, res) => {
             try {
                 const config = await readConfig();
-                // 返回安全配置，包含 display_name 和 branch
                 const safeConfig = {
                     repo_url: config.repo_url || '',
-                    github_token: config.github_token || '', 
                     display_name: config.display_name || '',
-                    branch: config.branch || DEFAULT_BRANCH, // 返回分支
+                    branch: config.branch || DEFAULT_BRANCH,
                     is_authorized: config.is_authorized || false,
-                    username: config.username || null, // Keep GitHub username if fetched
-                    // 新增：返回定时存档配置
+                    username: config.username || null,
                     autoSaveEnabled: config.autoSaveEnabled || false,
                     autoSaveInterval: config.autoSaveInterval || 30,
                     autoSaveTargetTag: config.autoSaveTargetTag || '',
+                    has_github_token: !!config.github_token,
                 };
                 res.json(safeConfig);
             } catch (error) {
@@ -1143,57 +1019,47 @@ async function init(router) {
             }
         });
 
-        // 保存配置
         router.post('/config', async (req, res) => {
             try {
-                const { 
-                    repo_url, github_token, display_name, branch, is_authorized, 
-                    autoSaveEnabled, autoSaveInterval, autoSaveTargetTag // 添加定时存档字段
-                } = req.body; 
+                const {
+                    repo_url, github_token, display_name, branch, is_authorized,
+                    autoSaveEnabled, autoSaveInterval, autoSaveTargetTag
+                } = req.body;
                 let currentConfig = await readConfig();
-                
-                // 只更新传入的字段
-                currentConfig.repo_url = repo_url !== undefined ? repo_url : currentConfig.repo_url;
-                currentConfig.github_token = github_token !== undefined ? github_token : currentConfig.github_token;
-                currentConfig.display_name = display_name !== undefined ? display_name : currentConfig.display_name;
-                currentConfig.branch = branch !== undefined ? (branch.trim() || DEFAULT_BRANCH) : currentConfig.branch; 
-                // is_authorized 只能在 authorize 接口中设为 true, 但可以被设为 false (例如登出)
-                if (is_authorized !== undefined) {
-                    currentConfig.is_authorized = !!is_authorized; 
+
+                currentConfig.repo_url = repo_url !== undefined ? repo_url.trim() : currentConfig.repo_url;
+                if (github_token) { 
+                    currentConfig.github_token = github_token;
                 }
-                // 新增：处理定时存档配置
+                currentConfig.display_name = display_name !== undefined ? display_name.trim() : currentConfig.display_name;
+                currentConfig.branch = branch !== undefined ? (branch.trim() || DEFAULT_BRANCH) : currentConfig.branch;
+                if (is_authorized !== undefined) {
+                    currentConfig.is_authorized = !!is_authorized;
+                }
                 if (autoSaveEnabled !== undefined) {
                     currentConfig.autoSaveEnabled = !!autoSaveEnabled;
                 }
                 if (autoSaveInterval !== undefined) {
                     const interval = parseFloat(autoSaveInterval);
-                    // 验证输入是否为有效正数
                     if (isNaN(interval) || interval <= 0) {
-                        // 输入无效，返回错误
                         return res.status(400).json({ success: false, message: '无效的自动存档间隔。请输入一个大于 0 的数字。' });
                     }
-                    // 输入有效，保存
                     currentConfig.autoSaveInterval = interval;
                 }
                 if (autoSaveTargetTag !== undefined) {
-                    // 移除可能的空格，但不强制要求标签名格式
-                    currentConfig.autoSaveTargetTag = autoSaveTargetTag.trim(); 
+                    currentConfig.autoSaveTargetTag = autoSaveTargetTag.trim();
                 }
-                
+
                 await saveConfig(currentConfig);
-                
-                // --- 新增：保存配置后重新设置后端定时器 ---
+
                 setupBackendAutoSaveTimer();
-                
-                // 返回更新后的安全配置
+
                 const safeConfig = {
                     repo_url: currentConfig.repo_url,
-                    github_token: currentConfig.github_token ? '******' : '', // 仍然在此处屏蔽，但在authorize时不依赖它
                     display_name: currentConfig.display_name,
                     branch: currentConfig.branch,
                     is_authorized: currentConfig.is_authorized,
                     username: currentConfig.username,
-                    // 新增：返回定时存档配置
                     autoSaveEnabled: currentConfig.autoSaveEnabled,
                     autoSaveInterval: currentConfig.autoSaveInterval,
                     autoSaveTargetTag: currentConfig.autoSaveTargetTag
@@ -1205,181 +1071,124 @@ async function init(router) {
             }
         });
 
-        // 授权检查和初始化 - 修改：授权成功后启动后端定时器
         router.post('/authorize', async (req, res) => {
+             let authGit; 
             try {
-                const { branch } = req.body; // 从请求体获取分支
-                let config = await readConfig(); // 读取当前完整配置
-                const targetBranch = branch || config.branch || DEFAULT_BRANCH; // 确定目标分支
+                const { branch } = req.body;
+                let config = await readConfig();
+                const targetBranch = branch || config.branch || DEFAULT_BRANCH;
 
-                // 授权时必须有 URL 和 Token (从已保存的 config 读取)
                 if (!config.repo_url || !config.github_token) {
-                    return res.status(400).json({ success: false, message: '仓库URL和GitHub Token未配置，请先点击"配置"按钮保存设置' });
+                    return res.status(400).json({ success: false, message: '仓库URL和GitHub Token未配置，请先保存设置' });
                 }
 
-                // 1. 更新配置中的分支 (如果提供了新的)
                 if (branch && config.branch !== targetBranch) {
                     config.branch = targetBranch;
-                    // 暂时不保存，等授权成功再保存
                 }
-                
-                config.is_authorized = false; // 先标记为未授权
+                config.is_authorized = false;
 
-                // 2. 初始化Git仓库 (如果需要)
                 const initResult = await initGitRepo();
                 if (!initResult.success) {
-                    return res.status(500).json({ success: false, message: initResult.message, details: initResult });
+                    return res.status(500).json({ success: false, message: initResult.message, details: initResult.details });
                 }
-                console.log('[cloud-saves] git init 成功');
-
-                // --- 新增：进行初始提交 ---
-                try {
-                    console.log('[cloud-saves] 添加所有文件到初始暂存区...');
-                    const addAllResult = await runGitCommand('git add -A');
-                    if (!addAllResult.success) throw new Error(`添加文件到暂存区失败: ${addAllResult.stderr}`);
-
-                    // 检查是否真的有东西需要提交
-                    const statusResult = await runGitCommand('git status --porcelain');
-                    if (statusResult.success && statusResult.stdout.trim() !== '') {
-                        console.log('[cloud-saves] 执行初始提交...');
-                        const commitMessage = 'Initial commit of existing data directory';
-                        const displayName = config.display_name || config.username || 'Cloud Saves User';
-                        const placeholderEmail = 'cloud-saves@sillytavern.local';
-                        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
-                        const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
-                        // 忽略 "nothing to commit" 错误，但也检查其他错误
-                        if (!commitResult.success && !commitResult.stderr.includes('nothing to commit')) {
-                            throw new Error(`初始提交失败: ${commitResult.stderr}`);
-                        }
-                        console.log('[cloud-saves] 初始提交完成。');
-                    } else {
-                        console.log('[cloud-saves] data 目录为空或无更改，跳过初始提交。');
-                    }
-                } catch (initialCommitError) {
-                     console.error('[cloud-saves] 执行初始提交时出错:', initialCommitError);
-                     // 即使初始提交失败，也可能继续配置远程，让用户后续处理？或者直接报错？
-                     // 暂时选择报错，因为后续操作很可能失败
-                     return res.status(500).json({ success: false, message: `创建初始提交失败: ${initialCommitError.message}` });
-                 }
-                // --- 初始提交结束 ---
-
-                // 3. 配置远程仓库 (如果 URL 已配置)
-                const remoteResult = await configureRemote(config.repo_url);
-                if (!remoteResult.success) {
-                    return res.status(500).json({ success: false, message: remoteResult.message, details: remoteResult });
-                }
-
-                // 4. 尝试访问远程仓库 (git fetch) - 修改：更精确的 fetch
-                console.log("[cloud-saves] 检查远程连接并获取标签...");
-                const fetchTagsResult = await runGitCommand('git fetch origin --tags --prune-tags --force'); // 获取所有标签，并清理不存在的远程标签，强制更新本地标签
-                if (!fetchTagsResult.success) {
-                    await saveConfig(config); // 保存未授权状态
-                    // 修改：返回 400 Bad Request 而不是 401
-                    return res.status(400).json({ 
-                        success: false, 
-                        message: '配置错误或权限不足：无法访问远程仓库或获取标签，请检查URL、Token权限和分支名称。', 
-                        details: fetchTagsResult 
-                    });
-                }
-                console.log("[cloud-saves] 获取标签成功。");
                 
-                // 5. 检查目标分支是否存在于远程 (恢复使用 ls-remote，因其直接查询远程且 token 注入已修复)
+                authGit = simpleGit(DATA_DIR);
+
+                try {
+                     console.log('[cloud-saves] 准备初始提交...');
+                     await authGit.add('.');
+                     const status = await authGit.status();
+                     if (!status.isClean()) {
+                         console.log('[cloud-saves] 执行初始提交...');
+                         await authGit.commit('Initial commit of existing data directory');
+                         console.log('[cloud-saves] 初始提交完成。');
+                     } else {
+                         console.log('[cloud-saves] data 目录无更改，跳过初始提交。');
+                     }
+                 } catch (initialCommitError) {
+                      if (!initialCommitError.message.includes('nothing to commit')) {
+                           console.error('[cloud-saves] 执行初始提交时出错:', initialCommitError);
+                           return res.status(500).json({ success: false, message: `创建初始提交失败: ${initialCommitError.message}` });
+                      }
+                      console.log('[cloud-saves] 初始提交时无更改 (捕获异常)。');
+                 }
+
+                let authUrl = config.repo_url;
+                if (config.repo_url.startsWith('https://') && !config.repo_url.includes('@')) {
+                    authUrl = config.repo_url.replace('https://', `https://x-access-token:${config.github_token}@`);
+                }
+                const remotes = await authGit.getRemotes(true);
+                const origin = remotes.find(r => r.name === 'origin');
+                if (origin) {
+                     if (origin.refs.push !== authUrl) {
+                        await authGit.remote(['set-url', 'origin', authUrl]);
+                     }
+                } else {
+                     await authGit.addRemote('origin', authUrl);
+                }
+                console.log('[cloud-saves] 远程仓库已配置');
+
+                try {
+                    await authGit.fetch(['origin', '--tags', '--prune', '--force']);
+                    console.log("[cloud-saves] 获取标签成功。");
+                } catch(fetchError) {
+                     await saveConfig(config);
+                     return res.status(400).json({
+                         success: false,
+                         message: '配置错误或权限不足：无法访问远程仓库或获取标签，请检查URL、Token权限。',
+                         details: fetchError.message
+                     });
+                }
+                
                 console.log(`[cloud-saves] 检查远程分支 ${targetBranch}...`);
-                const checkRemoteBranchResult = await runGitCommand(`git ls-remote --heads origin ${targetBranch}`);
-                // ls-remote 成功且输出包含目标分支 ref 即表示存在
-                const remoteBranchExists = checkRemoteBranchResult.success && 
-                                         checkRemoteBranchResult.stdout && 
-                                         checkRemoteBranchResult.stdout.includes(`refs/heads/${targetBranch}`);
+                let remoteBranchExists = false;
+                 try {
+                     const remoteHeads = await authGit.listRemote(['--heads', 'origin', targetBranch]);
+                     remoteBranchExists = typeof remoteHeads === 'string' && remoteHeads.includes(`refs/heads/${targetBranch}`);
+                 } catch (lsRemoteError) {
+                      console.warn(`[cloud-saves] ls-remote 检查分支 ${targetBranch} 失败，假设其不存在。错误:`, lsRemoteError.message);
+                      remoteBranchExists = false;
+                 }
+
 
                 if (!remoteBranchExists) {
-                    // Branch truly doesn't exist remotely, proceed with creation
                     console.log(`[cloud-saves] 远程分支 ${targetBranch} 不存在，尝试创建...`);
-                    // 尝试在本地创建一个空的提交（如果需要）并切换到该分支，然后推送到远程创建分支
                     try {
-                        // 检查本地分支是否存在
-                        const checkLocalBranchResult = await runGitCommand(`git show-ref --verify --quiet refs/heads/${targetBranch}`);
-                        if (!checkLocalBranchResult.success) {
-                            // 本地分支不存在，从当前 HEAD 创建
-                            console.log(`[cloud-saves] 创建本地分支 ${targetBranch}...`);
-                            const createLocalBranchResult = await runGitCommand(`git checkout -b ${targetBranch}`);
-                            if (!createLocalBranchResult.success) throw new Error(`创建本地分支失败: ${createLocalBranchResult.stderr}`);
-                        } else {
-                            // 本地分支存在，切换过去
-                            console.log(`[cloud-saves] 切换到本地分支 ${targetBranch}...`);
-                            const switchBranchResult = await runGitCommand(`git checkout ${targetBranch}`);
-                            if (!switchBranchResult.success) throw new Error(`切换到本地分支失败: ${switchBranchResult.stderr}`);
-                        }
-                        
-                        // 推送以在远程创建分支
+                        const localBranches = await authGit.branchLocal();
+                         if (!localBranches.all.includes(targetBranch)) {
+                             console.log(`[cloud-saves] 创建本地分支 ${targetBranch}...`);
+                             await authGit.checkout(['-b', targetBranch]); 
+                         } else {
+                              await authGit.checkout(targetBranch);
+                         }
+                         
                         console.log(`[cloud-saves] 推送以创建远程分支 ${targetBranch}...`);
-                        const pushNewBranchResult = await runGitCommand(`git push --set-upstream origin ${targetBranch}`);
-                        if (!pushNewBranchResult.success) {
-                             // --- BEGIN Improved non-fast-forward handling ---
-                             if (pushNewBranchResult.stderr && pushNewBranchResult.stderr.includes('non-fast-forward')) {
-                                 console.warn(`[cloud-saves] 推送创建分支 ${targetBranch} 时发生 non-fast-forward 错误，远程分支实际已存在且历史冲突。`);
-                                 throw new Error(`远程分支 ${targetBranch} 已存在，但本地历史与之冲突 (non-fast-forward)。请尝试手动执行 'git pull origin ${targetBranch}' 来合并远程更改，然后再试。`);
-                             } else {
-                                 throw new Error(`推送创建远程分支失败: ${pushNewBranchResult.stderr || pushNewBranchResult.error || '未知错误'}`);
-                             }
-                             // --- END Improved non-fast-forward handling ---
-                        }
+                        await authGit.push(['--set-upstream', 'origin', targetBranch]);
                         console.log(`[cloud-saves] 远程分支 ${targetBranch} 创建成功`);
                     } catch (createBranchError) {
-                        console.error(`[cloud-saves] 自动创建分支 ${targetBranch} 失败:`, createBranchError);
-                        await saveConfig(config); // 保存未授权状态
-                        // 将详细信息传递给前端
-                        return res.status(500).json({ success: false, message: `无法自动创建或同步远程分支 ${targetBranch}。错误：${createBranchError.message}`, details: createBranchError.message });
+                         console.error(`[cloud-saves] 自动创建/推送分支 ${targetBranch} 失败:`, createBranchError);
+                         await saveConfig(config);
+                         if (createBranchError.message.includes('non-fast-forward')) {
+                              return res.status(500).json({ success: false, message: `远程分支 ${targetBranch} 已存在，但本地历史与之冲突 (non-fast-forward)。请尝试手动解决或选择其他分支名。`, details: createBranchError.message });
+                         }
+                         return res.status(500).json({ success: false, message: `无法自动创建或同步远程分支 ${targetBranch}。错误：${createBranchError.message}`, details: createBranchError.message });
                     }
                 } else {
                     console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在，确保本地同步并切换...`);
-                    // 先 fetch origin 获取所有远程分支的最新信息
-                    console.log(`[cloud-saves] 执行 fetch origin 获取所有远程分支的最新信息...`);
-                    const fetchAllResult = await runGitCommand(`git fetch origin`);
-                    // --- BEGIN: Add detailed logging after fetch ---
-                    console.log(`[cloud-saves] fetch origin result:`, JSON.stringify(fetchAllResult)); 
-                    if (!fetchAllResult.success) {
-                        // 如果 fetch 失败，则无法继续
-                        console.error(`[cloud-saves] 获取远程 origin 失败: ${fetchAllResult.stderr}`);
-                        await saveConfig(config); // 保存未授权状态
-                        return res.status(500).json({ success: false, message: `无法获取远程仓库 origin 的信息`, details: fetchAllResult.stderr });
+                    try {
+                        await authGit.fetch('origin', targetBranch);
+                        await authGit.checkout(['-B', targetBranch, `origin/${targetBranch}`]);
+                        console.log(`[cloud-saves] 已切换到并跟踪远程分支 ${targetBranch}`);
+                    } catch (syncError) {
+                         console.error(`[cloud-saves] 同步或切换到远程分支 ${targetBranch} 失败:`, syncError);
+                         await saveConfig(config);
+                         return res.status(500).json({ success: false, message: `无法同步或切换到远程分支 ${targetBranch}。错误：${syncError.message}`, details: syncError.message });
                     }
-                    
-                    // Log remote ref existence after fetch
-                    console.log(`[cloud-saves] 检查本地是否存在 refs/remotes/origin/${targetBranch} (fetch origin 后)...`);
-                    const checkRemoteRefAfterFetch = await runGitCommand(`git show-ref refs/remotes/origin/${targetBranch}`);
-                    console.log(`[cloud-saves] show-ref refs/remotes/origin/${targetBranch} (fetch origin 后) result:`, JSON.stringify(checkRemoteRefAfterFetch));
-                    
-                    // Log all branches after fetch
-                    console.log(`[cloud-saves] 检查所有本地及远程跟踪分支 (fetch origin 后)...`);
-                    const checkAllBranchesAfterFetch = await runGitCommand(`git branch -a`);
-                    console.log(`[cloud-saves] git branch -a (fetch origin 后) result:`, JSON.stringify(checkAllBranchesAfterFetch));
-                    // --- END: Add detailed logging after fetch ---
-                    
-                    // 尝试基于 FETCH_HEAD 创建并切换到本地分支
-                    console.log(`[cloud-saves] 尝试基于 FETCH_HEAD 创建并切换到本地分支 ${targetBranch}...`);
-                    const createBranchResult = await runGitCommand(`git checkout -b ${targetBranch} FETCH_HEAD`);
-                    if (!createBranchResult.success) {
-                         console.error(`[cloud-saves] 基于 FETCH_HEAD 创建分支 ${targetBranch} 失败: ${createBranchResult.stderr}`);
-                        await saveConfig(config); // 保存未授权状态
-                        return res.status(500).json({ success: false, message: `无法基于 FETCH_HEAD 创建本地分支 ${targetBranch}`, details: createBranchResult.stderr });
-                    }
-                    console.log(`[cloud-saves] 成功创建并切换到本地分支 ${targetBranch}`);
-                     
-                    /* // 移除设置上游跟踪，因为它依赖于本地 refs/remotes/origin/main 的存在，而 fetch origin <branch> 不保证创建它
-                     console.log(`[cloud-saves] 设置本地分支 ${targetBranch} 跟踪 origin/${targetBranch}...`);
-                     const setUpstreamResult = await runGitCommand(`git branch --set-upstream-to=origin/${targetBranch} ${targetBranch}`);
-                     if (!setUpstreamResult.success) {
-                          // 警告但可能不阻断流程，因为分支已经创建并切换
-                          console.warn(`[cloud-saves] 设置分支 ${targetBranch} 跟踪信息失败: ${setUpstreamResult.stderr}`);
-                     }
-                    */
                 }
 
-                // 6. 标记为已授权并保存最终配置
                 config.is_authorized = true;
-                config.branch = targetBranch; // 确认分支已保存
-                
-                // 可选：尝试获取GitHub用户名并保存
+                config.branch = targetBranch;
+
                 try {
                     const validationResponse = await fetch('https://api.github.com/user', {
                         headers: { 'Authorization': `token ${config.github_token}` }
@@ -1387,56 +1196,63 @@ async function init(router) {
                     if (validationResponse.ok) {
                         const userData = await validationResponse.json();
                         config.username = userData.login || null;
+                    } else {
+                        console.warn(`[cloud-saves] 获取GitHub用户名失败: ${validationResponse.status}`);
                     }
                 } catch (fetchUserError) {
-                    console.warn('[cloud-saves] 获取GitHub用户名失败:', fetchUserError.message);
+                    console.warn('[cloud-saves] 获取GitHub用户名时发生网络错误:', fetchUserError.message);
                 }
-                
+
                 await saveConfig(config);
-                
-                // --- 新增：授权成功后启动后端定时器 ---
                 setupBackendAutoSaveTimer();
-                
-                res.json({ success: true, message: '授权和配置成功', config: config });
+
+                const safeConfig = {
+                    repo_url: config.repo_url,
+                    display_name: config.display_name,
+                    branch: config.branch,
+                    is_authorized: config.is_authorized,
+                    username: config.username,
+                    autoSaveEnabled: config.autoSaveEnabled,
+                    autoSaveInterval: config.autoSaveInterval,
+                    autoSaveTargetTag: config.autoSaveTargetTag
+                };
+
+                res.json({ success: true, message: '授权和配置成功', config: safeConfig });
+
             } catch (error) {
-                // 授权失败时，确保定时器是停止的
-                setupBackendAutoSaveTimer(); // 调用它会检查 is_authorized=false 并停止定时器
+                 console.error("[cloud-saves] 授权过程中发生严重错误:", error);
+                 try {
+                      let cfg = await readConfig();
+                      cfg.is_authorized = false;
+                      await saveConfig(cfg);
+                 } catch (saveErr) { /* Ignore */ }
+                 setupBackendAutoSaveTimer();
                 res.status(500).json({ success: false, message: '授权过程中发生错误', error: error.message });
             }
         });
 
-        // 获取Git状态
         router.get('/status', async (req, res) => {
             try {
                 const status = await getGitStatus();
                 const tempStashStatus = await checkTempStash();
                 res.json({ success: true, status: { ...status, tempStash: tempStashStatus } });
             } catch (error) {
-                res.status(500).json({ success: false, message: '获取状态失败', error: error.message });
+                res.status(500).json({ success: false, message: error.message || '获取状态失败', details: error.details });
             }
         });
 
-        // 获取存档列表
         router.get('/saves', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
-            }
-            // 确保在获取前拉取最新的标签和分支信息
-            const config = await readConfig();
-            if (config.is_authorized) {
-                 await runGitCommand('git fetch origin --tags');
-                 const branch = config.branch || DEFAULT_BRANCH;
-                 await runGitCommand(`git fetch origin ${branch}`); // 拉取当前分支的更新
             }
             try {
                 const result = await listSaves();
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '获取存档列表失败', error: error.message });
+                res.status(500).json(error);
             }
         });
 
-        // 创建新存档 - 已修改为使用配置的分支
         router.post('/saves', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1449,11 +1265,11 @@ async function init(router) {
                 const result = await createSave(name, description);
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '创建存档失败', error: error.message });
+                 console.error('[cloud-saves] Unexpected error in POST /saves:', error);
+                 res.status(500).json({ success: false, message: '创建存档时发生意外错误', details: error.message });
             }
         });
 
-        // 加载存档 - 已修改为在 detached HEAD 下工作
         router.post('/saves/load', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1466,11 +1282,11 @@ async function init(router) {
                 const result = await loadSave(tagName);
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '加载存档失败', error: error.message });
+                console.error('[cloud-saves] Unexpected error in POST /saves/load:', error);
+                res.status(500).json({ success: false, message: '加载存档时发生意外错误', details: error.message });
             }
         });
 
-        // 删除存档
         router.delete('/saves/:tagName', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1483,11 +1299,11 @@ async function init(router) {
                 const result = await deleteSave(tagName);
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '删除存档失败', error: error.message });
+                console.error('[cloud-saves] Unexpected error in DELETE /saves/:tagName:', error);
+                res.status(500).json({ success: false, message: '删除存档时发生意外错误', details: error.message });
             }
         });
 
-        // 重命名存档
         router.put('/saves/:oldTagName', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1501,11 +1317,11 @@ async function init(router) {
                 const result = await renameSave(oldTagName, newName, description);
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '重命名存档失败', error: error.message });
+                console.error('[cloud-saves] Unexpected error in PUT /saves/:oldTagName:', error);
+                res.status(500).json({ success: false, message: '重命名存档时发生意外错误', details: error.message });
             }
         });
 
-        // 获取存档差异
         router.get('/saves/diff', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1513,16 +1329,16 @@ async function init(router) {
             try {
                 const { tag1, tag2 } = req.query;
                 if (!tag1 || !tag2) {
-                    return res.status(400).json({ success: false, message: '需要提供两个存档标签名' });
+                    return res.status(400).json({ success: false, message: '需要提供两个存档标签名/引用' });
                 }
                 const result = await getSaveDiff(tag1, tag2);
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '获取存档差异失败', error: error.message });
+                console.error('[cloud-saves] Unexpected error in GET /saves/diff:', error);
+                res.status(500).json({ success: false, message: '获取存档差异时发生意外错误', details: error.message });
             }
         });
 
-        // 应用临时 Stash
         router.post('/stash/apply', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1531,11 +1347,11 @@ async function init(router) {
                 const result = await applyTempStash();
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '应用临时Stash失败', error: error.message });
+                 console.error('[cloud-saves] Unexpected error in POST /stash/apply:', error);
+                res.status(500).json({ success: false, message: '应用临时Stash时发生意外错误', details: error.message });
             }
         });
 
-        // 丢弃临时 Stash
         router.post('/stash/discard', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1544,143 +1360,106 @@ async function init(router) {
                 const result = await discardTempStash();
                 res.json(result);
             } catch (error) {
-                res.status(500).json({ success: false, message: '丢弃临时Stash失败', error: error.message });
+                 console.error('[cloud-saves] Unexpected error in POST /stash/discard:', error);
+                res.status(500).json({ success: false, message: '丢弃临时Stash时发生意外错误', details: error.message });
             }
         });
 
-        // --- 新增：覆盖存档接口 ---
         router.post('/saves/:tagName/overwrite', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
             }
-            currentOperation = 'overwrite_save'; // 设置操作状态
+            currentOperation = 'overwrite_save';
+            const { tagName } = req.params;
+            let git;
             try {
-                const { tagName } = req.params;
-        const config = await readConfig();
-
+                const config = await readConfig();
                 if (!config.is_authorized) {
                     return res.status(401).json({ success: false, message: '未授权，请先连接仓库' });
                 }
-
                 console.log(`[cloud-saves] 准备覆盖存档: ${tagName}`);
-
-                // 0. 获取旧标签的描述和创建者信息，以便尽可能保留
-                let originalDescription = `Overwrite of ${tagName}`;
-                const fetchTagInfoResult = await runGitCommand(`git tag -n1 -l "${tagName}" --format="%(contents)"`); 
-                if (fetchTagInfoResult.success && fetchTagInfoResult.stdout.trim()) {
-                    // 只取第一行作为基础描述，避免重复添加 Last Updated
-                    originalDescription = fetchTagInfoResult.stdout.trim().split('\n')[0]; 
-                }
-                const displayName = config.display_name || config.username || 'Cloud Saves User';
-                const placeholderEmail = 'cloud-saves@sillytavern.local';
-                const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
+                git = await getGitInstance();
                 const branchToUse = config.branch || DEFAULT_BRANCH;
 
-                // 1. 添加当前所有更改到暂存区
-                const addResult = await runGitCommand('git add -A');
-                if (!addResult.success) throw new Error(`添加到暂存区失败: ${addResult.stderr}`);
+                let originalDescription = `Overwrite of ${tagName}`;
+                try {
+                     const tagInfoRaw = await git.raw('tag', '-n1', '-l', tagName, '--format=%(contents)');
+                     if (tagInfoRaw) {
+                         originalDescription = tagInfoRaw.trim().split('\n')[0];
+                     }
+                } catch (tagInfoError) { /* Ignore */ }
 
-                // 2. 检查是否有更改需要提交
-                const statusResult = await runGitCommand('git status --porcelain');
-                const hasChanges = statusResult.success && statusResult.stdout.trim() !== '';
-                let newCommitHash = 'HEAD'; // 默认指向当前HEAD
+                await git.add('.');
+                const status = await git.status();
+                const hasChanges = !status.isClean();
+                let newCommitHash;
 
                 if (hasChanges) {
-                    // 3. 创建新提交
-                    const commitMessage = `Overwrite save: ${tagName}`; // 使用标签名，因为解码后的名字可能包含特殊字符
+                    const commitMessage = `Overwrite save: ${tagName}`;
                     console.log(`[cloud-saves] 创建覆盖提交: "${commitMessage}"`);
-                    const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
-                    if (!commitResult.success) {
-                        // 检查是否是因为 "nothing to commit" 错误
-                        if (commitResult.stderr && commitResult.stderr.includes('nothing to commit')) {
-                            console.log('[cloud-saves] 覆盖时无实际更改可提交，将使用当前 HEAD');
-                            const headCommitResult = await runGitCommand('git rev-parse HEAD');
-                            if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-                            newCommitHash = headCommitResult.stdout.trim();
-                        } else {
-                            throw new Error(`创建覆盖提交失败: ${commitResult.stderr}`);
-                        }
-                    } else {
-                        // 获取新提交的哈希
-                        const newCommitResult = await runGitCommand('git rev-parse HEAD');
-                        if (!newCommitResult.success) throw new Error('获取新提交哈希失败');
-                        newCommitHash = newCommitResult.stdout.trim();
+                    try {
+                        const commitResult = await git.commit(commitMessage);
+                        newCommitHash = commitResult.commit;
                         console.log(`[cloud-saves] 新覆盖提交哈希: ${newCommitHash}`);
-                        
-                        // 4. 推送新提交到当前分支 (如果需要)
-                        console.log(`[cloud-saves] 推送覆盖提交到分支: ${branchToUse}`);
-                        const pushCommitResult = await runGitCommand(`git push origin ${branchToUse}`);
-                        if (!pushCommitResult.success) {
-                             console.warn(`[cloud-saves] 推送覆盖提交到分支 ${branchToUse} 失败:`, pushCommitResult.stderr);
-                             // 根据策略决定是否继续 (例如，如果只是标签操作，可能可以继续)
+                        try {
+                            await git.push('origin', branchToUse);
+                        } catch (pushCommitError) {
+                            console.warn(`[cloud-saves] 推送覆盖提交到分支 ${branchToUse} 失败:`, pushCommitError.message);
                         }
+                    } catch (commitError) {
+                         if (commitError.message.includes('nothing to commit')) {
+                             console.log('[cloud-saves] 覆盖时无实际更改可提交，将使用当前 HEAD');
+                             newCommitHash = await git.revparse('HEAD');
+                         } else {
+                             throw commitError;
+                         }
                     }
                 } else {
-                     console.log('[cloud-saves] 覆盖时无实际更改可提交，将使用当前 HEAD');
-                     const headCommitResult = await runGitCommand('git rev-parse HEAD');
-                     if (!headCommitResult.success) throw new Error('获取当前 HEAD 提交哈希失败');
-                     newCommitHash = headCommitResult.stdout.trim();
+                    console.log('[cloud-saves] 覆盖时无实际更改可提交，将使用当前 HEAD');
+                    newCommitHash = await git.revparse('HEAD');
                 }
 
-                // 5. 删除旧标签 (本地和远程)
-                console.log(`[cloud-saves] 删除旧标签 (本地): ${tagName}`);
-                await runGitCommand(`git tag -d "${tagName}"`); // 忽略错误，可能本地不存在
-                console.log(`[cloud-saves] 删除旧标签 (远程): ${tagName}`);
-                const deleteRemoteResult = await runGitCommand(`git push origin :refs/tags/${tagName}`);
-                 if (!deleteRemoteResult.success && !deleteRemoteResult.stderr.includes('remote ref does not exist')) {
-                    console.warn(`[cloud-saves] 删除远程旧标签 ${tagName} 时遇到问题 (可能不存在或网络问题):`, deleteRemoteResult.stderr);
-                 }
+                 if (!newCommitHash) throw new Error('无法确定用于覆盖的提交哈希');
 
-                // 6. 基于新提交创建同名新标签
-                console.log(`[cloud-saves] 基于提交 ${newCommitHash} 创建新标签: ${tagName}`);
-                const tagMessage = originalDescription; // 使用获取到的或默认的基础描述
+                try { await git.tag(['-d', tagName]); } catch(e) {/*ignore*/}
+                try {
+                    await git.push(['origin', `:refs/tags/${tagName}`]);
+                } catch (delRemoteErr) {
+                     if (!delRemoteErr.message.includes('remote ref does not exist')) {
+                          console.warn(`[cloud-saves] 删除远程旧标签 ${tagName} 时遇到问题:`, delRemoteErr.message);
+                     }
+                }
+
+                const tagMessage = originalDescription;
                 const nowTimestampOverwrite = new Date().toISOString();
                 const fullTagMessageOverwrite = `${tagMessage}\nLast Updated: ${nowTimestampOverwrite}`;
-                const newTagResult = await runGitCommand(`git ${gitConfigArgs} tag -a "${tagName}" -m "${fullTagMessageOverwrite}" ${newCommitHash}`);
-                if (!newTagResult.success) {
-                    // 如果创建失败，尝试恢复（可能比较困难，需要回滚提交等）
-                    throw new Error(`创建新标签 ${tagName} 失败: ${newTagResult.stderr}`);
+                await git.addAnnotatedTag(tagName, fullTagMessageOverwrite, newCommitHash);
+
+                try {
+                    await git.push('origin', tagName);
+                } catch (pushTagError) {
+                     await git.tag(['-d', tagName]);
+                     throw pushTagError;
                 }
 
-                // 7. 推送新标签到远程
-                console.log(`[cloud-saves] 推送新标签到远程: ${tagName}`);
-                const pushNewTagResult = await runGitCommand(`git push origin "${tagName}"`);
-                if (!pushNewTagResult.success) {
-                     // 如果推送新标签失败，尝试回滚本地标签创建？
-                     await runGitCommand(`git tag -d "${tagName}"`);
-                    throw new Error(`推送新标签 ${tagName} 到远程失败: ${pushNewTagResult.stderr}`);
-                }
-
-                // 8. 更新 config 中的 last_save (如果适用)
                 const saveNameMatch = tagName.match(/^save_\d+_(.+)$/);
                 let saveName = tagName;
-                if (saveNameMatch) { 
-                    try {
-                        saveName = Buffer.from(saveNameMatch[1], 'base64url').toString('utf8');
-                    } catch (e) { /* ignore */ }
-                }
-                // 更新 last_save 时，使用更新后的时间戳和描述
+                if (saveNameMatch) { try { saveName = Buffer.from(saveNameMatch[1], 'base64url').toString('utf8'); } catch (e) {/*ignore*/} }
                 if (config.last_save && config.last_save.tag === tagName) {
-                    config.last_save = { 
-                        name: saveName, 
-                        tag: tagName, 
-                        timestamp: nowTimestampOverwrite, // 使用覆盖操作的时间
-                        description: originalDescription // 使用基础描述
-                    };
-                await saveConfig(config);
+                    config.last_save = { name: saveName, tag: tagName, timestamp: nowTimestampOverwrite, description: originalDescription };
+                    await saveConfig(config);
                 }
 
                 res.json({ success: true, message: '存档覆盖成功' });
 
             } catch (error) {
-                console.error(`[cloud-saves] 覆盖存档 ${req.params.tagName} 失败:`, error);
-                res.status(500).json({ success: false, message: `覆盖存档失败: ${error.message}`, error: error.message });
+                console.error(`[cloud-saves] 覆盖存档 ${tagName} 失败:`, error);
+                res.status(500).json(handleGitError(error, `覆盖存档 ${tagName}`));
             } finally {
-                currentOperation = null; // 释放操作状态
+                currentOperation = null;
             }
         });
 
-        // --- 新增：强制初始化仓库接口 ---
         router.post('/initialize', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
@@ -1690,180 +1469,167 @@ async function init(router) {
                 console.log('[cloud-saves] 收到强制初始化仓库请求...');
                 const config = await readConfig();
 
-                // 强制删除可能的旧 .git 目录以确保全新初始化
-                // **警告**: 这会删除 data 目录下的 Git 历史！
                 const gitDirPath = path.join(DATA_DIR, '.git');
                 try {
+                    console.log(`[cloud-saves] 强制删除旧的 ${gitDirPath} 目录...`);
                     await fs.rm(gitDirPath, { recursive: true, force: true });
                     console.log(`[cloud-saves] 已强制删除旧的 ${gitDirPath} 目录`);
                 } catch (rmError) {
-                    // 如果删除失败（例如权限问题），记录错误但可能继续尝试 init
-                    console.error(`[cloud-saves] 删除旧的 ${gitDirPath} 目录失败:`, rmError);
+                    console.error(`[cloud-saves] 删除旧的 ${gitDirPath} 目录失败 (可能不存在或权限问题):`, rmError);
                 }
 
-                // 1. 执行 git init
-                const initResult = await initGitRepo(); 
+                const initResult = await initGitRepo();
                 if (!initResult.success) {
-                    return res.status(500).json({ success: false, message: `初始化Git仓库失败: ${initResult.message}`, details: initResult });
+                    return res.status(500).json({ success: false, message: `初始化Git仓库失败: ${initResult.message}`, details: initResult.details });
                 }
-                console.log('[cloud-saves] git init 成功');
+                console.log('[cloud-saves] git init 成功 (强制)');
 
-                // --- 新增：进行初始提交 ---
+                 const git = simpleGit(DATA_DIR);
+
                 try {
-                    console.log('[cloud-saves] 添加所有文件到初始暂存区...');
-                    const addAllResult = await runGitCommand('git add -A');
-                    if (!addAllResult.success) throw new Error(`添加文件到暂存区失败: ${addAllResult.stderr}`);
-
-                    // 检查是否真的有东西需要提交
-                    const statusResult = await runGitCommand('git status --porcelain');
-                    if (statusResult.success && statusResult.stdout.trim() !== '') {
-                        console.log('[cloud-saves] 执行初始提交...');
-                        const commitMessage = 'Initial commit of existing data directory';
-                        const displayName = config.display_name || config.username || 'Cloud Saves User';
-                        const placeholderEmail = 'cloud-saves@sillytavern.local';
-                        const gitConfigArgs = `-c user.name="${displayName}" -c user.email="${placeholderEmail}"`;
-                        const commitResult = await runGitCommand(`git ${gitConfigArgs} commit -m "${commitMessage}"`);
-                        // 忽略 "nothing to commit" 错误，但也检查其他错误
-                        if (!commitResult.success && !commitResult.stderr.includes('nothing to commit')) {
-                            throw new Error(`初始提交失败: ${commitResult.stderr}`);
-                        }
-                        console.log('[cloud-saves] 初始提交完成。');
-                    } else {
-                        console.log('[cloud-saves] data 目录为空或无更改，跳过初始提交。');
-                    }
-                } catch (initialCommitError) {
-                     console.error('[cloud-saves] 执行初始提交时出错:', initialCommitError);
-                     // 即使初始提交失败，也可能继续配置远程，让用户后续处理？或者直接报错？
-                     // 暂时选择报错，因为后续操作很可能失败
-                     return res.status(500).json({ success: false, message: `创建初始提交失败: ${initialCommitError.message}` });
+                     console.log('[cloud-saves] 添加初始提交 (强制)...');
+                     await git.add('.');
+                     const status = await git.status();
+                     if (!status.isClean()) {
+                         await git.commit('Initial commit after forced re-initialization');
+                         console.log('[cloud-saves] 初始提交完成 (强制)');
+                     } else {
+                         console.log('[cloud-saves] data 目录无更改，跳过初始提交 (强制)');
+                     }
+                 } catch (initialCommitError) {
+                      if (!initialCommitError.message.includes('nothing to commit')) {
+                           console.error('[cloud-saves] 执行初始提交时出错 (强制):', initialCommitError);
+                      }
                  }
-                // --- 初始提交结束 ---
 
-                // 2. 配置远程仓库 (如果 URL 已配置)
                 if (config.repo_url) {
-                    console.log(`[cloud-saves] 配置远程仓库: ${config.repo_url}`);
-                    const remoteResult = await configureRemote(config.repo_url);
-                    if (!remoteResult.success) {
-                        // 初始化成功，但配置远程失败，返回警告信息
-                        return res.json({ 
-                            success: true, 
-                            message: '仓库初始化成功，但配置远程仓库失败，请检查仓库 URL。', 
-                            warning: true, 
-                            details: remoteResult 
-                        });
-                    }
-                    console.log('[cloud-saves] 配置远程仓库成功');
-            } else {
-                    console.log('[cloud-saves] 未配置仓库 URL，跳过配置远程仓库');
+                    console.log(`[cloud-saves] 配置远程仓库 (强制): ${config.repo_url}`);
+                    let authUrl = config.repo_url;
+                     if (config.github_token && authUrl.startsWith('https://') && !authUrl.includes('@')) {
+                         authUrl = config.repo_url.replace('https://', `https://x-access-token:${config.github_token}@`);
+                     }
+                     try {
+                          try { await git.removeRemote('origin'); } catch(e) {/*ignore*/}
+                          await git.addRemote('origin', authUrl);
+                          console.log('[cloud-saves] 配置远程仓库成功 (强制)');
+                     } catch (remoteError) {
+                          console.error('[cloud-saves] 配置远程仓库失败 (强制):', remoteError);
+                          return res.json({
+                              success: true,
+                              message: '仓库初始化成功，但配置远程仓库失败，请检查仓库 URL 或后续手动配置。',
+                              warning: true,
+                              details: remoteError.message
+                          });
+                     }
+                } else {
+                    console.log('[cloud-saves] 未配置仓库 URL，跳过配置远程仓库 (强制)');
                 }
 
-                res.json({ success: true, message: '仓库初始化成功' + (config.repo_url ? ' 并已配置远程仓库' : '') });
+                res.json({ success: true, message: '仓库强制初始化成功' + (config.repo_url ? ' 并已配置远程仓库' : '') });
 
             } catch (error) {
-                console.error('[cloud-saves] 初始化仓库时发生错误:', error);
-                res.status(500).json({ success: false, message: `初始化仓库时发生错误: ${error.message}` });
+                console.error('[cloud-saves] 强制初始化仓库时发生错误:', error);
+                res.status(500).json(handleGitError(error, '强制初始化仓库'));
             } finally {
                 currentOperation = null;
             }
         });
 
-        // --- 新增：插件初始化完成后启动定时器 ---
-        setupBackendAutoSaveTimer();
-
-        // --- 新增：检查和执行更新接口 ---
         router.post('/update/check-and-pull', async (req, res) => {
             if (currentOperation) {
                 return res.status(409).json({ success: false, message: `正在进行操作: ${currentOperation}` });
             }
             currentOperation = 'check_update';
-            const pluginDir = __dirname; // 插件目录
-            const targetRemote = 'https://github.com/fuwei99/cloud-saves.git'; // 目标更新源
-            const targetBranch = 'main';
+            const pluginDir = __dirname;
+             const targetRemoteUrl = 'https://github.com/fuwei99/cloud-saves.git';
+             const targetBranch = 'main';
+             let git;
 
             try {
-                console.log('[cloud-saves] 开始检查更新...');
+                console.log('[cloud-saves] 开始检查插件更新...');
+                 git = simpleGit(pluginDir); 
 
-                // 1. 检查插件目录是否为 Git 仓库
-                const isRepoResult = await runGitCommand('git rev-parse --is-inside-work-tree', { cwd: pluginDir });
-                if (!isRepoResult.success || isRepoResult.stdout.trim() !== 'true') {
-                    console.warn('[cloud-saves] 插件目录不是有效的 Git 仓库，无法自动更新。');
+                const isRepo = await git.checkIsRepo();
+                if (!isRepo) {
+                    console.warn('[cloud-saves] 插件目录不是有效的 Git 仓库。');
                     return res.json({ success: true, status: 'not_git_repo', message: '无法自动更新：插件似乎不是通过 Git 安装的。' });
                 }
 
-                // 2. 检查远程地址是否匹配
-                const remoteUrlResult = await runGitCommand('git remote get-url origin', { cwd: pluginDir });
-                const localRemoteUrl = remoteUrlResult.success ? remoteUrlResult.stdout.trim() : '';
-                const targetRemoteWithoutGit = targetRemote.replace('.git', '');
-                
-                // 允许匹配带 .git 或不带 .git 的 URL
-                if (!localRemoteUrl || (localRemoteUrl !== targetRemote && localRemoteUrl !== targetRemoteWithoutGit)) {
-                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${localRemoteUrl || '未获取到'}) 与目标 (${targetRemote} 或 ${targetRemoteWithoutGit}) 不匹配，无法安全更新。`);
-                    return res.json({ 
-                        success: false, 
-                        status: 'wrong_remote', 
-                        message: `无法更新：插件远程地址 (${localRemoteUrl || '未设置'}) 与预期 (${targetRemote}) 不符。请确保插件是从官方地址克隆的。` 
-                    });
-                 }
-
-                // 3. 获取本地 HEAD 哈希
-                const localHeadResult = await runGitCommand('git rev-parse HEAD', { cwd: pluginDir });
-                if (!localHeadResult.success) {
-                    throw new Error('无法获取本地版本信息。');
+                const remotes = await git.getRemotes(true);
+                const origin = remotes.find(r => r.name === 'origin');
+                if (!origin) {
+                     return res.json({ success: false, status: 'no_remote', message: '无法更新：插件仓库未配置名为 "origin" 的远程。' });
                 }
-                const localHash = localHeadResult.stdout.trim();
+                
+                const localRemoteUrl = origin.refs.push;
+                const targetRemoteWithoutGit = targetRemoteUrl.replace('.git', '');
+                if (localRemoteUrl !== targetRemoteUrl && localRemoteUrl !== targetRemoteWithoutGit) {
+                    console.warn(`[cloud-saves] 插件仓库的远程地址 (${localRemoteUrl}) 与目标 (${targetRemoteUrl}) 不匹配。`);
+                    return res.json({
+                        success: false,
+                        status: 'wrong_remote',
+                        message: `无法更新：插件远程地址 (${localRemoteUrl}) 与预期 (${targetRemoteUrl}) 不符。请确保插件是从官方地址克隆的。`
+                    });
+                }
+
+                 console.log('[cloud-saves] Fetching updates from origin...');
+                 await git.fetch('origin', targetBranch);
+
+                 const localHash = await git.revparse('HEAD');
+                 const remoteHash = await git.revparse(`origin/${targetBranch}`);
+
                 console.log(`[cloud-saves] 本地版本: ${localHash}`);
+                console.log(`[cloud-saves] 远程版本 (origin/${targetBranch}): ${remoteHash}`);
 
-                // 4. 获取远程 HEAD 哈希
-                console.log(`[cloud-saves] 获取远程 ${targetBranch} 分支版本...`);
-                // 注意：ls-remote 不需要 token，因为是公共仓库
-                const remoteHeadResult = await runGitCommand(`git ls-remote origin refs/heads/${targetBranch}`, { cwd: pluginDir });
-                if (!remoteHeadResult.success || !remoteHeadResult.stdout.trim()) {
-                     throw new Error(`无法获取远程 ${targetBranch} 分支版本信息。`);
-                 }
-                 // 修复：正确分割并获取哈希
-                const remoteHash = remoteHeadResult.stdout.trim().split(/\s+/)[0]; // 使用正则表达式分割空白
-                console.log(`[cloud-saves] 远程版本: ${remoteHash}`);
-
-                // 5. 比较哈希
                 if (localHash === remoteHash) {
                     console.log('[cloud-saves] 当前已是最新版本。');
                     return res.json({ success: true, status: 'latest', message: '已是最新版本。' });
                 }
 
-                // 6. 执行更新 (git pull)
-                console.log('[cloud-saves] 检测到新版本，尝试执行 git pull...');
-                const pullResult = await runGitCommand(`git pull origin ${targetBranch}`, { cwd: pluginDir });
-                
-                if (!pullResult.success) {
-                    console.error('[cloud-saves] git pull 失败:', pullResult.stderr);
-                    // 移除对本地修改的特定检查，统一报告 pull 失败
-                    return res.json({ 
-                        success: false, 
-                        status: 'pull_failed', 
-                        message: `更新失败：执行 git pull 时出错。错误: ${pullResult.stderr || pullResult.error || '未知错误'}` 
-                    });
+                 const status = await git.status();
+                 if (!status.isClean()) {
+                     console.warn('[cloud-saves] 检测到本地修改，无法自动拉取更新。');
+                     return res.json({
+                         success: false,
+                         status: 'local_changes',
+                         message: '无法更新：检测到插件文件有本地修改。请先儲藏(stash)或提交您的更改，或手动执行 git pull。'
+                     });
                  }
-                
-                console.log('[cloud-saves] git pull 成功！');
-                return res.json({ success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' });
+
+                console.log('[cloud-saves] 检测到新版本，尝试执行 git pull...');
+                const pullSummary = await git.pull('origin', targetBranch); 
+
+                 if (pullSummary.files && pullSummary.files.length > 0 || pullSummary.summary.changes > 0) {
+                      console.log('[cloud-saves] git pull 成功！', pullSummary.summary);
+                      return res.json({ success: true, status: 'updated', message: '插件更新成功！请务必重启 SillyTavern 服务以应用更改。' });
+                 } else if (pullSummary.summary.alreadyUpdated) {
+                      console.log('[cloud-saves] Pull 表示已是最新 (可能 fetch 后状态已更新)');
+                       return res.json({ success: true, status: 'latest', message: '已是最新版本。' });
+                 }
+                 else {
+                      console.error('[cloud-saves] git pull 执行完成，但似乎未成功更新或状态未知。', pullSummary);
+                      return res.json({
+                           success: false,
+                           status: 'pull_failed',
+                           message: `更新似乎失败或状态未知。请检查控制台日志或尝试手动执行 git pull。`
+                      });
+                 }
 
             } catch (error) {
-                console.error('[cloud-saves] 检查或执行更新时出错:', error);
+                console.error('[cloud-saves] 检查或执行插件更新时出错:', error);
                 res.status(500).json({ success: false, status:'error', message: `检查更新时发生内部错误: ${error.message}` });
             } finally {
                 currentOperation = null;
             }
         });
-        
-        // --- 初始化逻辑 --- (检查配置，连接远程等) - 修改：初始化后启动后端定时器
-        const config = await readConfig();
+
+        setupBackendAutoSaveTimer();
 
     } catch (error) {
-        console.error('[cloud-saves] 初始化失败:', error);
+        console.error('[cloud-saves] 插件初始化失败:', error);
     }
 }
 
-// 插件导出对象 - 移除 router
 const plugin = {
     info: info,
     init: init,
