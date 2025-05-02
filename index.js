@@ -187,34 +187,18 @@ async function addGitkeepRecursively(directory) {
         }
 
     } catch (error) {
-        console.error(`[cloud-saves] Error processing directory ${path.relative(DATA_DIR, directory) || '.'} for .gitkeep:`, error);
+        // Log error if directory doesn't exist during recursion, but don't stop the whole process
+        if (error.code !== 'ENOENT') {
+             console.error(`[cloud-saves] Error processing directory ${path.relative(DATA_DIR, directory) || '.'} for .gitkeep:`, error);
+        }
     }
 }
 
-// NEW: Helper function to recursively remove nested .git and .gitignore files
-async function removeNestedGitFiles(currentPath) {
-    // Safety check: Never operate directly on the main DATA_DIR itself for removal
-    if (currentPath === DATA_DIR) {
-        try {
-            const topLevelEntries = await fs.readdir(currentPath, { withFileTypes: true });
-            for (const entry of topLevelEntries) {
-                if (entry.isDirectory() && entry.name !== '.git') { // Don't recurse into the main .git!
-                    await removeNestedGitFiles(path.join(currentPath, entry.name));
-                }
-                // Optionally remove top-level .gitignore if needed, but usually we want to keep the main one.
-                // else if (entry.isFile() && entry.name === '.gitignore') { ... remove logic ... }
-            }
-        } catch (error) {
-             console.error(`[cloud-saves] Error reading top-level directory ${currentPath} for nested git removal:`, error);
-        }
-        return; // Stop recursion at top level
-    }
-
-    // Process subdirectories
+async function removeNestedGitFiles(targetPath) {
     try {
-        const entries = await fs.readdir(currentPath, { withFileTypes: true });
+        const entries = await fs.readdir(targetPath, { withFileTypes: true });
         for (const entry of entries) {
-            const entryPath = path.join(currentPath, entry.name);
+            const entryPath = path.join(targetPath, entry.name);
             if (entry.isDirectory()) {
                 if (entry.name === '.git') {
                     try {
@@ -224,7 +208,7 @@ async function removeNestedGitFiles(currentPath) {
                         console.error(`[cloud-saves] Failed to remove nested .git directory ${entryPath}:`, rmError);
                     }
                 } else {
-                    // Recursively process other subdirectories
+                    // Recursively process other subdirectories within the target path
                     await removeNestedGitFiles(entryPath);
                 }
             } else if (entry.isFile() && entry.name === '.gitignore') {
@@ -237,18 +221,22 @@ async function removeNestedGitFiles(currentPath) {
             }
         }
     } catch (error) {
-        console.error(`[cloud-saves] Error processing directory ${currentPath} for nested git file removal:`, error);
+         // If the targetPath itself doesn't exist, just log it and return gracefully.
+         if (error.code === 'ENOENT') {
+             console.log(`[cloud-saves] Directory ${targetPath} not found for nested git removal, skipping.`);
+             return;
+         }
+        console.error(`[cloud-saves] Error processing directory ${targetPath} for nested git file removal:`, error);
     }
 }
 
 async function initGitRepo() {
     if (await isGitInitialized()) {
-        // If already initialized, we might still want to run the cleanup?
-        // Or only run cleanup on fresh init? Let's do it only on fresh init for now.
+        // If already initialized, should we run cleanup?
+        // For now, let's only run cleanup during the *very first* initialization
+        // or when forced via the /initialize endpoint.
+        // If forced, the /initialize handler should delete .git first, then call this.
         console.log('[cloud-saves] Git repository already initialized in data directory.');
-        // Optionally, trigger cleanup here too if needed for existing setups upon re-auth/re-init?
-        // console.log('[cloud-saves] Running nested .git/.gitignore cleanup on existing repo...');
-        // await removeNestedGitFiles(DATA_DIR);
         return { success: true, message: 'Git仓库已在data目录中初始化' };
     }
 
@@ -258,23 +246,34 @@ async function initGitRepo() {
         await git.init();
         console.log('[cloud-saves] git init 成功');
 
-        // --- ADDED: Remove nested .git and .gitignore FIRST ---
-        console.warn('[cloud-saves] WARNING: Removing nested .git directories and .gitignore files within subdirectories...');
-        await removeNestedGitFiles(DATA_DIR); // Start the recursive removal
-        console.log('[cloud-saves] Finished removing nested git files.');
-        // --- END ADDED ---
+        // --- MODIFIED: Target specific extensions directory for cleanup ---
+        const extensionsPath = path.join(DATA_DIR, 'default-user', 'extensions'); // Define the target path
+        console.warn(`[cloud-saves] WARNING: Attempting to remove nested .git directories and .gitignore files within ${extensionsPath} ...`);
+        try {
+            await fs.access(extensionsPath); // Check if the directory exists first
+            await removeNestedGitFiles(extensionsPath); // Start the recursive removal ONLY here
+            console.log(`[cloud-saves] Finished removing nested git files within ${extensionsPath}.`);
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                console.log(`[cloud-saves] Extensions directory (${extensionsPath}) not found, skipping nested git removal.`);
+            } else {
+                 console.error(`[cloud-saves] Error accessing extensions directory for cleanup: ${error}`);
+            }
+        }
+        // --- END MODIFIED ---
 
-        // --- THEN add .gitkeep ---
-        console.log('[cloud-saves] Adding .gitkeep files to ensure directory tracking...');
-        await addGitkeepRecursively(DATA_DIR);
+        // --- Add .gitkeep to ALL directories under DATA_DIR (including extensions) ---
+        console.log('[cloud-saves] Adding .gitkeep files to ensure all directory tracking...');
+        await addGitkeepRecursively(DATA_DIR); // Run this on the root data dir
         console.log('[cloud-saves] Finished adding .gitkeep files.');
         // --- END .gitkeep ---
 
-        // --- FINALLY create the main .gitignore ---
+        // --- Create the main .gitignore in DATA_DIR ---
         try {
             const gitignorePath = path.join(DATA_DIR, '.gitignore');
             // Keep .gitkeep visible, ignore common cache/upload dirs
-            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\\n*\\n\\n# Ignore specific subdirectories within data\\n_uploads/\\n_cache/\\n_storage/\\n_webpack/\\n\\n# Keep .gitkeep files visible to git\\n!.gitkeep\\n";
+            // No need to explicitly ignore extensions/ here anymore as we want to track its content
+            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n\n# Keep .gitkeep files visible to git\n!.gitkeep\n";
             await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
             console.log(`[cloud-saves] 已成功创建/更新主 ${gitignorePath}`);
         } catch (gitignoreError) {
@@ -282,9 +281,7 @@ async function initGitRepo() {
         }
         // --- END main .gitignore ---
 
-        // Note: No commit here, just preparation.
-
-        return { success: true, message: 'Git仓库初始化成功，嵌套的.git/.gitignore已移除，并添加了.gitkeep文件' };
+        return { success: true, message: 'Git仓库初始化成功，extensions目录下的嵌套git文件已清理，并添加了.gitkeep文件' };
     } catch (error) {
         return handleGitError(error, '初始化Git仓库');
     }
