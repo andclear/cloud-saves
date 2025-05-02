@@ -1103,12 +1103,16 @@ document.addEventListener('DOMContentLoaded', function() {
             if (result.success) {
                 let message = result.message || '仓库初始化成功';
                 if (result.warning) {
+                    // 显示警告，并提示重新授权
                     showToast('警告', message, 'warning');
+                    showToast('提示', '初始化完成，请点击 **授权并连接** 按钮以验证并同步远程仓库。', 'info'); // 添加提示
                 } else {
+                    // 显示成功，并提示重新授权
                     showToast('成功', message, 'success');
+                    showToast('提示', '初始化完成，请点击 **授权并连接** 按钮以验证并同步远程仓库。', 'info'); // 添加提示
                 }
-                // 初始化后刷新状态
-                await refreshStatus(); 
+                // 初始化后刷新状态 (可能显示未授权)
+                await refreshStatus();
             } else {
                 throw new Error(result.message || '初始化仓库失败');
             }
