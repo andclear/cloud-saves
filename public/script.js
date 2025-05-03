@@ -191,9 +191,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // 初始化
     async function init() {
         try {
-            console.log('[Cloud Saves UI][DEBUG] init() called.');
             const config = await apiCall('config');
-            console.log('[Cloud Saves UI][DEBUG] Received config in init():', JSON.stringify(config));
 
             if (config.repo_url) repoUrlInput.value = config.repo_url;
             if (config.display_name) displayNameInput.value = config.display_name;
@@ -201,7 +199,6 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // --- Token Input Handling ---
             initialConfigHasToken = config.has_github_token; // 记录初始状态
-            console.log(`[Cloud Saves UI][DEBUG] init() - initialConfigHasToken set to: ${initialConfigHasToken}`);
             if (initialConfigHasToken) {
                 githubTokenInput.placeholder = "访问令牌已保存"; // 设置提示
                 githubTokenInput.value = ""; // 确保实际值为空
@@ -209,7 +206,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx"; // 默认提示
                 githubTokenInput.value = "";
             }
-            console.log(`[Cloud Saves UI][DEBUG] init() - githubTokenInput placeholder: "${githubTokenInput.placeholder}", value: "${githubTokenInput.value}"`);
             // --- End Token Input Handling ---
             
             autoSaveEnabledSwitch.checked = config.autoSaveEnabled || false;
@@ -226,8 +222,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 await loadSavesList();
             }
         } catch (error) {
-            console.error('初始化失败:', error);
-            showToast('错误', `初始化失败: ${error.message}`, 'error');
             // 初始化失败时，也重置 token 输入框状态
             githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
             githubTokenInput.value = "";
@@ -279,7 +273,6 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             // NOTE: DO NOT reset initialConfigHasToken here. It reflects backend state.
         }
-         console.log(`[Cloud Saves UI][DEBUG] updateAuthUI finished. isAuthorized=${isAuthorized}, initialConfigHasToken=${initialConfigHasToken}, placeholder="${githubTokenInput.placeholder}"`);
     }
 
     // 刷新Git状态
@@ -913,14 +906,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // 保存配置函数
     async function saveConfiguration() {
-        console.log('[Cloud Saves UI][DEBUG] saveConfiguration() called.');
         const repoUrl = repoUrlInput.value.trim();
         const token = githubTokenInput.value.trim();
         const displayName = displayNameInput.value.trim();
         const branch = branchInput.value.trim() || 'main';
-
-        console.log(`[Cloud Saves UI][DEBUG] saveConfiguration() - Values read: repoUrl="${repoUrl}", token.length=${token.length}, displayName="${displayName}", branch="${branch}"`);
-        console.log(`[Cloud Saves UI][DEBUG] saveConfiguration() - Current initialConfigHasToken: ${initialConfigHasToken}`);
 
         try {
             showLoading('正在保存配置...');
@@ -931,31 +920,25 @@ document.addEventListener('DOMContentLoaded', function() {
                 branch: branch
                 // 注意：这里不发送 is_authorized, autoSave* 等字段，避免意外修改
             });
-            console.log('[Cloud Saves UI][DEBUG] saveConfiguration() - API call successful, result:', JSON.stringify(result));
 
             if (result.success) {
                 showToast('成功', '配置已保存', 'success');
                 branchInput.value = branch; // 更新UI上的分支名
 
                 // --- 更新前端 token 状态 ---
-                console.log('[Cloud Saves UI][DEBUG] saveConfiguration() - Updating UI state after save.');
                 if (token) { // 如果用户输入了新的 token 并保存成功
-                    console.log('[Cloud Saves UI][DEBUG] saveConfiguration() - Token was provided and saved.');
                     initialConfigHasToken = true;
                     githubTokenInput.placeholder = "访问令牌已保存"; // 更新placeholder
                     githubTokenInput.value = ""; // 清空输入框的值
                 } else if (!token && !initialConfigHasToken) {
                     // 如果用户没输入 token，且原本就没有 token，保持原样
-                    console.log('[Cloud Saves UI][DEBUG] saveConfiguration() - No token provided, no existing token.');
                     githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
                     githubTokenInput.value = "";
                 } else if (!token && initialConfigHasToken) {
                     // 如果用户没输入 token，但原本有 token，恢复 placeholder
-                    console.log('[Cloud Saves UI][DEBUG] saveConfiguration() - No token provided, but token existed before.');
                     githubTokenInput.placeholder = "访问令牌已保存";
                     githubTokenInput.value = "";
                 }
-                console.log(`[Cloud Saves UI][DEBUG] saveConfiguration() - AFTER UI update: initialConfigHasToken=${initialConfigHasToken}, placeholder="${githubTokenInput.placeholder}", value="${githubTokenInput.value}"`);
 
                 // --- 结束更新前端 token 状态 ---
 
@@ -965,7 +948,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 throw new Error(result.message || '保存配置失败');
             }
         } catch (error) {
-            console.error('[Cloud Saves UI][DEBUG] saveConfiguration() - Error caught:', error);
             hideLoading();
             console.error('保存配置失败:', error);
             showToast('错误', `保存配置失败: ${error.message}`, 'error');
@@ -1071,13 +1053,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 'init-repo-btn');
     safeAddEventListener(configureBtn, 'click', saveConfiguration, 'configure-btn');
     safeAddEventListener(authorizeBtn, 'click', async () => {
-        console.log('[Cloud Saves UI][DEBUG] Authorize button clicked.');
         const repoUrl = repoUrlInput.value.trim();
         const tokenInputValue = githubTokenInput.value.trim(); // 读取当前输入框的值
         const displayName = displayNameInput.value.trim();
         const branch = branchInput.value.trim() || 'main';
-        console.log(`[Cloud Saves UI][DEBUG] Authorize click - Values read: repoUrl="${repoUrl}", tokenInputValue.length=${tokenInputValue.length}, displayName="${displayName}", branch="${branch}"`);
-        console.log(`[Cloud Saves UI][DEBUG] Authorize click - Current initialConfigHasToken: ${initialConfigHasToken}`);
 
         if (!repoUrl) {
             showToast('错误', '仓库 URL 不能为空', 'error');
@@ -1085,18 +1064,15 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         // 检查1: 如果用户 *输入了新* token
         if (tokenInputValue && tokenInputValue !== "") {
-            console.log('[Cloud Saves UI][DEBUG] Authorize click - Check 1 triggered (token input has value). Showing hint.');
             showToast('提示', '检测到新的访问令牌输入，请先点击"配置"按钮保存新令牌，然后再点击"授权并连接"。', 'info');
             return; // 阻止直接授权
         }
         // 检查2: 如果用户 *没输入新* token，且 *后台原本就没* token
         if (!tokenInputValue && !initialConfigHasToken) {
-            console.log('[Cloud Saves UI][DEBUG] Authorize click - Check 2 triggered (token input empty AND no initial token). Showing error.');
             showToast('错误', 'GitHub 访问令牌不能为空，请在上方输入或点击"配置"保存。', 'error');
             return;
         }
 
-        console.log('[Cloud Saves UI][DEBUG] Authorize click - Proceeding to call authorize().');
         // 如果执行到这里，说明：
         // - URL 已输入
         // - 要么输入框为空且后台有 token (initialConfigHasToken is true) -> 使用后台 token

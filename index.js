@@ -1116,7 +1116,7 @@ async function init(router) {
                     autoSaveTargetTag: config.autoSaveTargetTag || '',
                     has_github_token: !!config.github_token,
                 };
-                console.log('[cloud-saves][DEBUG] Sending GET /config response:', JSON.stringify(safeConfig));
+                // console.log('[cloud-saves][DEBUG] Sending GET /config response:', JSON.stringify(safeConfig));
                 res.json(safeConfig);
             } catch (error) {
                 res.status(500).json({ success: false, message: '读取配置失败', error: error.message });
@@ -1130,14 +1130,14 @@ async function init(router) {
                     autoSaveEnabled, autoSaveInterval, autoSaveTargetTag
                 } = req.body;
                 let currentConfig = await readConfig();
-                console.log('[cloud-saves][DEBUG] Received POST /config request body:', JSON.stringify(req.body, (key, value) => key === 'github_token' && value ? '******' : value)); // Mask token in log
+                // DEBUG: console.log('[cloud-saves][DEBUG] Received POST /config request body:', JSON.stringify(req.body, (key, value) => key === 'github_token' && value ? '******' : value)); // Mask token in log
 
                 currentConfig.repo_url = repo_url !== undefined ? repo_url.trim() : currentConfig.repo_url;
-                if (github_token) { 
-                    console.log('[cloud-saves][DEBUG] Saving new GitHub token (length:', github_token.length, ')');
+                if (github_token) {
+                    // DEBUG: console.log('[cloud-saves][DEBUG] Saving new GitHub token (length:', github_token.length, ')');
                     currentConfig.github_token = github_token;
                 } else {
-                    console.log('[cloud-saves][DEBUG] No new GitHub token provided in POST /config request.');
+                    // DEBUG: console.log('[cloud-saves][DEBUG] No new GitHub token provided in POST /config request.');
                 }
                 currentConfig.display_name = display_name !== undefined ? display_name.trim() : currentConfig.display_name;
                 currentConfig.branch = branch !== undefined ? (branch.trim() || DEFAULT_BRANCH) : currentConfig.branch;
@@ -1159,7 +1159,7 @@ async function init(router) {
                 }
 
                 await saveConfig(currentConfig);
-                console.log('[cloud-saves][DEBUG] Config saved successfully after POST /config.');
+                // DEBUG: console.log('[cloud-saves][DEBUG] Config saved successfully after POST /config.');
 
                 setupBackendAutoSaveTimer();
 
@@ -1173,7 +1173,7 @@ async function init(router) {
                     autoSaveInterval: currentConfig.autoSaveInterval,
                     autoSaveTargetTag: currentConfig.autoSaveTargetTag
                 };
-                console.log('[cloud-saves][DEBUG] Sending POST /config response:', JSON.stringify(safeConfig));
+                // console.log('[cloud-saves][DEBUG] Sending POST /config response:', JSON.stringify(safeConfig));
                 res.json({ success: true, message: '配置保存成功', config: safeConfig });
             } catch (error) {
                 console.error('[cloud-saves] 保存配置失败:', error);
