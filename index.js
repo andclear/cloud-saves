@@ -230,12 +230,72 @@ async function removeNestedGitFiles(targetPath) {
     }
 }
 
+// NEW: Helper function to fix gitlink entries in the index for a specific path prefix
+async function fixGitlinkEntries(prefix) {
+    console.log(`[cloud-saves] Checking index for gitlink entries under prefix: ${prefix}`);
+    const git = simpleGit(DATA_DIR); // Use instance pointing to DATA_DIR
+    const prefixPath = prefix.endsWith('/') ? prefix : prefix + '/'; // Ensure trailing slash for path matching
+
+    try {
+        // Get the index content
+        // Format: <mode> <hash> <stage>\t<path>
+        const lsFilesOutput = await git.raw('ls-files', '--stage');
+        if (!lsFilesOutput) {
+            console.log('[cloud-saves] Index is empty, no gitlink entries to fix.');
+            return;
+        }
+
+        const lines = lsFilesOutput.trim().split('\n');
+        const gitlinksToRemove = [];
+
+        for (const line of lines) {
+            // Careful parsing: split by space/tab, path is after tab
+            const parts = line.split(/\s+/); // Split by whitespace
+            if (parts.length >= 4) {
+                const mode = parts[0];
+                const filePath = parts.slice(3).join(' '); // Rejoin path if it contains spaces
+
+                // Check if it's a gitlink (submodule) and within the target prefix
+                if (mode === '160000' && filePath.startsWith(prefixPath)) {
+                    console.log(`[cloud-saves] Found gitlink entry to remove from index: ${filePath}`);
+                    gitlinksToRemove.push(filePath);
+                }
+            }
+        }
+
+        if (gitlinksToRemove.length === 0) {
+            console.log(`[cloud-saves] No gitlink entries found under ${prefixPath}.`);
+            return;
+        }
+
+        // Remove the identified gitlink entries from the index
+        console.log(`[cloud-saves] Removing ${gitlinksToRemove.length} gitlink entries from index...`);
+        // Use raw command for rm --cached as simple-git might not directly support removing only from index
+        // Use --ignore-unmatch for robustness
+        for (const filePath of gitlinksToRemove) {
+            try {
+                 // Important: Need to quote paths in case they contain spaces
+                 // Use raw for precise control over 'rm --cached'
+                 await git.raw('rm', '--cached', '--ignore-unmatch', filePath);
+                 console.log(`[cloud-saves] Removed ${filePath} from index.`);
+            } catch (rmError) {
+                 // Log error but continue processing other entries
+                 console.error(`[cloud-saves] Failed to remove ${filePath} from index:`, rmError);
+            }
+        }
+        console.log('[cloud-saves] Finished removing gitlink entries from index.');
+
+    } catch (error) {
+        console.error(`[cloud-saves] Error fixing gitlink entries under ${prefix}:`, error);
+        // Decide if this should be a fatal error for initGitRepo?
+        // For now, just log it. Subsequent 'git add' might still work partially.
+        throw new Error(`Failed to fix gitlink entries: ${error.message}`); // Re-throw to signal potential issue
+    }
+}
+
+// 初始化Git仓库 (MODIFIED to include fixing gitlink entries)
 async function initGitRepo() {
     if (await isGitInitialized()) {
-        // If already initialized, should we run cleanup?
-        // For now, let's only run cleanup during the *very first* initialization
-        // or when forced via the /initialize endpoint.
-        // If forced, the /initialize handler should delete .git first, then call this.
         console.log('[cloud-saves] Git repository already initialized in data directory.');
         return { success: true, message: 'Git仓库已在data目录中初始化' };
     }
@@ -246,12 +306,12 @@ async function initGitRepo() {
         await git.init();
         console.log('[cloud-saves] git init 成功');
 
-        // --- MODIFIED: Target specific extensions directory for cleanup ---
-        const extensionsPath = path.join(DATA_DIR, 'default-user', 'extensions'); // Define the target path
-        console.warn(`[cloud-saves] WARNING: Attempting to remove nested .git directories and .gitignore files within ${extensionsPath} ...`);
+        // --- Step 1: Remove nested .git and .gitignore in extensions ---
+        const extensionsPath = path.join(DATA_DIR, 'default-user', 'extensions');
+        console.warn(`[cloud-saves] WARNING: Removing nested .git/.gitignore within ${extensionsPath} ...`);
         try {
-            await fs.access(extensionsPath); // Check if the directory exists first
-            await removeNestedGitFiles(extensionsPath); // Start the recursive removal ONLY here
+            await fs.access(extensionsPath);
+            await removeNestedGitFiles(extensionsPath);
             console.log(`[cloud-saves] Finished removing nested git files within ${extensionsPath}.`);
         } catch (error) {
             if (error.code === 'ENOENT') {
@@ -260,28 +320,33 @@ async function initGitRepo() {
                  console.error(`[cloud-saves] Error accessing extensions directory for cleanup: ${error}`);
             }
         }
-        // --- END MODIFIED ---
 
-        // --- Add .gitkeep to ALL directories under DATA_DIR (including extensions) ---
+        // --- Step 2: Fix gitlink entries in the index for extensions path ---
+        const extensionsRelativePath = path.relative(DATA_DIR, extensionsPath).replace(/\\/g, '/'); // Get relative path like 'default-user/extensions'
+        try {
+            await fixGitlinkEntries(extensionsRelativePath);
+        } catch (fixError) {
+             // Log the error but potentially continue, as add .gitkeep might still be useful
+             console.error('[cloud-saves] WARNING: Failed during gitlink fixing step, proceeding with .gitkeep addition.', fixError);
+        }
+        // --- END Step 2 ---
+
+        // --- Step 3: Add .gitkeep to ensure directory structure ---
         console.log('[cloud-saves] Adding .gitkeep files to ensure all directory tracking...');
-        await addGitkeepRecursively(DATA_DIR); // Run this on the root data dir
+        await addGitkeepRecursively(DATA_DIR);
         console.log('[cloud-saves] Finished adding .gitkeep files.');
-        // --- END .gitkeep ---
 
-        // --- Create the main .gitignore in DATA_DIR ---
+        // --- Step 4: Create the main .gitignore ---
         try {
             const gitignorePath = path.join(DATA_DIR, '.gitignore');
-            // Keep .gitkeep visible, ignore common cache/upload dirs
-            // No need to explicitly ignore extensions/ here anymore as we want to track its content
             const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n\n# Keep .gitkeep files visible to git\n!.gitkeep\n";
             await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
             console.log(`[cloud-saves] 已成功创建/更新主 ${gitignorePath}`);
         } catch (gitignoreError) {
             console.error(`[cloud-saves] 创建主 ${path.join(DATA_DIR, '.gitignore')} 文件失败:`, gitignoreError);
         }
-        // --- END main .gitignore ---
 
-        return { success: true, message: 'Git仓库初始化成功，extensions目录下的嵌套git文件已清理，并添加了.gitkeep文件' };
+        return { success: true, message: 'Git仓库初始化成功，嵌套git文件已清理，索引已修正，并添加了.gitkeep文件' }; // Updated message
     } catch (error) {
         return handleGitError(error, '初始化Git仓库');
     }
@@ -397,8 +462,11 @@ async function listSaves() {
         console.log('[cloud-saves] 获取存档列表');
         const git = await getGitInstance();
 
-        await git.fetch(['origin', '--tags', '--force']);
+        // Fetch tags from origin, FORCE update local refs, and PRUNE deleted tags
+        console.log('[cloud-saves] Fetching and pruning remote tags...');
+        await git.fetch(['origin', '--tags', '--force', '--prune-tags']);
 
+        // Get tags with details (lists local tags after pruning)
         const formatString = "%(refname:short)%00%(creatordate:iso)%00%(taggername)%00%(subject)%00%(contents)";
         const tagOutput = await git.raw('tag', '-l', 'save_*', '--sort=-creatordate', `--format=${formatString}`);
 
@@ -805,31 +873,50 @@ async function applyTempStash() {
 
     try {
         const git = simpleGit(DATA_DIR);
-        // Find the correct stash index (more robust than assuming stash@{0})
+        console.log('[cloud-saves][DEBUG] Checking stash list in applyTempStash...');
         const stashList = await git.stashList();
-         const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
-        if (!tempStash) {
-            config.has_temp_stash = false; // Clear flag if stash doesn't exist anymore
+        console.log('[cloud-saves][DEBUG] Stash list result:', JSON.stringify(stashList, null, 2));
+
+        const stashMessageToFind = 'Temporary stash before loading save';
+        // Use findIndex to get the index of the stash
+        const stashIndex = stashList.all.findIndex(s => s.message && s.message.includes(stashMessageToFind));
+
+        // DEBUG LOG: Print the found index
+        console.log(`[cloud-saves][DEBUG] Found tempStash index: ${stashIndex}`);
+
+        if (stashIndex === -1) { // Check if index was found
+            console.warn('[cloud-saves] Temporary stash message not found in list. Clearing flag.');
+            config.has_temp_stash = false;
             await saveConfig(config);
-             return { success: false, message: 'Temporary stash entry not found in stash list' };
+            return { success: false, message: `Stash with message "${stashMessageToFind}" not found in stash list` };
         }
-        
-        const stashRef = tempStash.ref; // e.g., 'stash@{0}' (Changed from .name)
+
+        // Construct the stash reference using the index
+        const stashRef = `stash@{${stashIndex}}`;
+
+        // DEBUG LOG: Print the constructed stashRef value
+        console.log(`[cloud-saves][DEBUG] Constructed stash ref to apply/drop: ${stashRef}`);
+
+        // No need for undefined check anymore as we construct it directly
 
         console.log(`[cloud-saves] Applying temporary stash: ${stashRef}`);
         await git.stash(['apply', stashRef]);
 
-        // Stash is applied, but not dropped. We SHOULD drop it now.
         console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
-        await git.stash(['drop', stashRef]);
-
+        try {
+            await git.stash(['drop', stashRef]);
+        } catch (dropError) {
+            console.error(`[cloud-saves] Failed to drop stash ${stashRef} after applying:`, dropError);
+            config.has_temp_stash = false; // Still clear flag maybe? Or leave it? Let's clear it and return warning.
+            await saveConfig(config);
+            return handleGitError(dropError, `应用成功但丢弃Stash ${stashRef} 失败`);
+        }
 
         config.has_temp_stash = false;
         await saveConfig(config);
 
         return { success: true, message: 'Temporary stash applied and dropped successfully' };
     } catch (error) {
-        // If apply fails, don't drop or clear the flag
         return handleGitError(error, '应用临时Stash');
     }
 }
@@ -842,16 +929,31 @@ async function discardTempStash() {
 
     try {
         const git = simpleGit(DATA_DIR);
-        // Find the correct stash index
+        console.log('[cloud-saves][DEBUG] Checking stash list in discardTempStash...');
         const stashList = await git.stashList();
-        const tempStash = stashList.all.find(s => s.message.includes('Temporary stash before loading save'));
-        if (!tempStash) {
-             config.has_temp_stash = false; // Clear flag if stash doesn't exist anymore
-             await saveConfig(config);
-             return { success: true, message: 'Temporary stash entry not found in stash list (already gone)' };
+        console.log('[cloud-saves][DEBUG] Stash list result:', JSON.stringify(stashList, null, 2));
+
+        const stashMessageToFind = 'Temporary stash before loading save';
+        // Use findIndex to get the index of the stash
+        const stashIndex = stashList.all.findIndex(s => s.message && s.message.includes(stashMessageToFind));
+
+        // DEBUG LOG: Print the found index
+        console.log(`[cloud-saves][DEBUG] Found tempStash index: ${stashIndex}`);
+
+        if (stashIndex === -1) { // Check if index was found
+            console.warn('[cloud-saves] Temporary stash message not found in list. Clearing flag.');
+            config.has_temp_stash = false;
+            await saveConfig(config);
+            return { success: true, message: `Stash with message "${stashMessageToFind}" already gone or not found` };
         }
-        
-        const stashRef = tempStash.ref; // e.g., 'stash@{0}' (Changed from .name)
+
+        // Construct the stash reference using the index
+        const stashRef = `stash@{${stashIndex}}`;
+
+        // DEBUG LOG: Print the constructed stashRef value
+        console.log(`[cloud-saves][DEBUG] Constructed stash ref to drop: ${stashRef}`);
+
+        // No need for undefined check
 
         console.log(`[cloud-saves] Dropping temporary stash: ${stashRef}`);
         await git.stash(['drop', stashRef]);
@@ -861,8 +963,6 @@ async function discardTempStash() {
 
         return { success: true, message: 'Temporary stash discarded' };
     } catch (error) {
-        // If drop fails, don't clear flag? Or assume it's gone?
-        // Let's assume it might still be there on error.
         return handleGitError(error, '丢弃临时Stash');
     }
 }
@@ -1016,6 +1116,7 @@ async function init(router) {
                     autoSaveTargetTag: config.autoSaveTargetTag || '',
                     has_github_token: !!config.github_token,
                 };
+                console.log('[cloud-saves][DEBUG] Sending GET /config response:', JSON.stringify(safeConfig));
                 res.json(safeConfig);
             } catch (error) {
                 res.status(500).json({ success: false, message: '读取配置失败', error: error.message });
@@ -1029,10 +1130,14 @@ async function init(router) {
                     autoSaveEnabled, autoSaveInterval, autoSaveTargetTag
                 } = req.body;
                 let currentConfig = await readConfig();
+                console.log('[cloud-saves][DEBUG] Received POST /config request body:', JSON.stringify(req.body, (key, value) => key === 'github_token' && value ? '******' : value)); // Mask token in log
 
                 currentConfig.repo_url = repo_url !== undefined ? repo_url.trim() : currentConfig.repo_url;
                 if (github_token) { 
+                    console.log('[cloud-saves][DEBUG] Saving new GitHub token (length:', github_token.length, ')');
                     currentConfig.github_token = github_token;
+                } else {
+                    console.log('[cloud-saves][DEBUG] No new GitHub token provided in POST /config request.');
                 }
                 currentConfig.display_name = display_name !== undefined ? display_name.trim() : currentConfig.display_name;
                 currentConfig.branch = branch !== undefined ? (branch.trim() || DEFAULT_BRANCH) : currentConfig.branch;
@@ -1054,6 +1159,7 @@ async function init(router) {
                 }
 
                 await saveConfig(currentConfig);
+                console.log('[cloud-saves][DEBUG] Config saved successfully after POST /config.');
 
                 setupBackendAutoSaveTimer();
 
@@ -1067,6 +1173,7 @@ async function init(router) {
                     autoSaveInterval: currentConfig.autoSaveInterval,
                     autoSaveTargetTag: currentConfig.autoSaveTargetTag
                 };
+                console.log('[cloud-saves][DEBUG] Sending POST /config response:', JSON.stringify(safeConfig));
                 res.json({ success: true, message: '配置保存成功', config: safeConfig });
             } catch (error) {
                 console.error('[cloud-saves] 保存配置失败:', error);
