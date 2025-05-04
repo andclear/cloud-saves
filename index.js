@@ -339,7 +339,8 @@ async function initGitRepo() {
         // --- Step 4: Create the main .gitignore ---
         try {
             const gitignorePath = path.join(DATA_DIR, '.gitignore');
-            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n\n# Keep .gitkeep files visible to git\n!.gitkeep\n";
+            // Corrected content: Use !* to un-ignore everything first, then specify exclusions.
+            const gitignoreContent = "# Ensure data directory contents are tracked, overriding parent ignores.\n!*\n\n# Ignore specific subdirectories within data\n_uploads/\n_cache/\n_storage/\n_webpack/\n";
             await fs.writeFile(gitignorePath, gitignoreContent, 'utf8');
             console.log(`[cloud-saves] 已成功创建/更新主 ${gitignorePath}`);
         } catch (gitignoreError) {
@@ -1284,16 +1285,9 @@ async function init(router) {
                          return res.status(500).json({ success: false, message: `无法自动创建或同步远程分支 ${targetBranch}。错误：${createBranchError.message}`, details: createBranchError.message });
                     }
                 } else {
-                    console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在，确保本地同步并切换...`);
-                    try {
-                        await authGit.fetch('origin', targetBranch);
-                        await authGit.checkout(['-B', targetBranch, `origin/${targetBranch}`]);
-                        console.log(`[cloud-saves] 已切换到并跟踪远程分支 ${targetBranch}`);
-                    } catch (syncError) {
-                         console.error(`[cloud-saves] 同步或切换到远程分支 ${targetBranch} 失败:`, syncError);
-                         await saveConfig(config);
-                         return res.status(500).json({ success: false, message: `无法同步或切换到远程分支 ${targetBranch}。错误：${syncError.message}`, details: syncError.message });
-                    }
+                    // Remote branch exists: Do nothing regarding local branch state.
+                    // The successful fetch/ls-remote earlier is sufficient validation.
+                    console.log(`[cloud-saves] 远程分支 ${targetBranch} 已存在。连接验证成功，不修改本地分支。`);
                 }
 
                 config.is_authorized = true;
