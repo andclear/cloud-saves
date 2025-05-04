@@ -1211,6 +1211,16 @@ async function init(router) {
                      const status = await authGit.status();
                      if (!status.isClean()) {
                          console.log('[cloud-saves] 执行初始提交...');
+                         // Add local config for user identity before committing
+                         try {
+                             console.log('[cloud-saves] Configuring local Git identity for initial commit...');
+                             await authGit.addConfig('user.name', 'Cloud Saves Plugin', false, 'local');
+                             await authGit.addConfig('user.email', 'cloud-saves@plugin.local', false, 'local');
+                             console.log('[cloud-saves] Local Git identity configured.');
+                         } catch (configError) {
+                             console.error('[cloud-saves] Failed to configure local Git identity:', configError);
+                             // Decide if this should prevent the commit? For now, log and continue, commit might still fail.
+                         }
                          await authGit.commit('Initial commit of existing data directory');
                          console.log('[cloud-saves] 初始提交完成。');
                      } else {
