@@ -1,145 +1,170 @@
-[English Readme](./README.en.md)
-# Cloud Saves - 使用 GitHub 轻松备份和同步你的 SillyTavern 数据！
+# 老婆包存档插件 (Laopobao Save)
 
-大家好！
+一个专为 SillyTavern 设计的老婆包数据管理插件，通过压缩包恢复功能轻松管理你的角色数据。
 
-你是否曾经担心过不小心丢失精心培养的 SillyTavern 角色卡、珍贵的聊天记录或者辛苦配置的世界信息？或者你希望能在不同的电脑或设备之间方便地同步你的 SillyTavern 体验？
+## 🎀 插件简介
 
-为了解决这些问题，我开发并分享一个全新的 SillyTavern 插件：**Cloud Saves**！
+老婆包存档插件是一个全新的 SillyTavern 插件，专门用于管理和恢复老婆包（角色包）数据。与传统的 Git 版本控制不同，本插件采用压缩包的方式来存储和恢复数据，操作更简单，更适合普通用户使用。
 
-## 🌟 Cloud Saves 能帮你做什么？
+## ✨ 主要功能
 
-这个插件的核心功能是将你的 SillyTavern `/data` 目录（包含角色、聊天记录、群组、世界信息、插件数据等几乎所有用户数据）安全地备份到你自己的 **私有 GitHub 仓库** 中。
+### 📦 压缩包管理
+- **下载压缩包**：从 GitHub 仓库下载 ZIP/TAR.GZ 格式的压缩包
+- **自动解压**：支持 ZIP 和 TAR.GZ 格式的自动解压缩
+- **数据恢复**：将压缩包内容恢复到 SillyTavern 数据目录
+- **文件管理**：列出、删除、重命名压缩包文件
+- **信息查看**：查看压缩包的详细信息（大小、修改时间等）
 
-通过 Cloud Saves，你可以：
+### 💾 本地备份
+- **自动备份**：在恢复数据前自动创建本地备份
+- **备份管理**：列出、恢复、删除本地备份
+- **安全保障**：确保数据恢复过程的安全性
 
-*   **🔒 数据安全备份**：再也不用担心本地硬盘故障或误操作导致数据丢失。
-*   **🔄 版本回滚**：轻松将你的 SillyTavern 恢复到过去的任何一个存档点。
-*   **☁️ 云端同步**：（潜在能力）如果你在多台设备上使用 SillyTavern，可以用它来同步数据（需要手动加载存档）。
-*   **🏷️ 清晰管理**：方便地创建、命名、查看、重命名和删除你的云端存档。
-*   **⏱️ 自动存档**：设置定时任务，让插件自动帮你备份最新的状态。
+### ⚙️ 配置管理
+- **GitHub 集成**：配置 GitHub Token 和仓库地址
+- **权限验证**：验证 GitHub 访问权限
+- **状态监控**：实时显示插件和仓库状态
 
+## 🚀 安装指南
 
-## ✨ 主要功能：
+### 前置要求
 
-*   **一键创建云存档**：将当前 `/data` 目录状态保存为一个新的云端存档点（Git Tag）。
-*   **方便加载云存档**：从列表中选择一个存档，将 `/data` 目录恢复到该状态（**注意：会覆盖本地数据！**）。
-*   **灵活管理存档**：
-    *   列出所有云端存档及其创建时间、描述。
-    *   重命名存档，修改描述。
-    *   删除不再需要的云存档（同时删除远程 Git Tag）。
-    *   比较云存档与当前本地数据的差异。
-*   **定时自动存档**：可配置启用，自动将当前状态覆盖到你指定的某个云存档（适合做周期性备份）。
+1. **Node.js 环境**
+   - 安装 Node.js (推荐 LTS 版本)
+   - 确保 npm 可用
+
+2. **SillyTavern 配置**
+   - 在 `config.yaml` 中启用插件支持：
+   ```yaml
+   enableServerPlugins: true
+   enableServerPluginsAutoUpdate: false
+   ```
+
+### 安装步骤
+
+1. **下载插件**
+   ```bash
+   cd SillyTavern/plugins
+   git clone https://github.com/your-username/sillytarven-laopobao-save.git
+   ```
+
+2. **安装依赖**
+   ```bash
+   cd sillytarven-laopobao-save
+   npm install
+   ```
+
+3. **重启 SillyTavern**
+   - 关闭当前 SillyTavern 服务
+   - 重新启动 SillyTavern
+
+## 🔧 配置说明
+
+### GitHub 配置
+
+1. **创建 GitHub 仓库**
+   - 在 GitHub 上创建一个新仓库（建议设为私有）
+   - 复制仓库的 HTTPS URL
+
+2. **生成访问令牌**
+   - 访问 GitHub [个人访问令牌](https://github.com/settings/tokens) 页面
+   - 生成新的 Classic Token
+   - 授予 `repo` 权限
+   - 复制并保存生成的令牌
+
+3. **插件配置**
+   - 打开插件界面：`http://localhost:8000/api/plugins/laopobao-save/ui`
+   - 填写 GitHub Token 和仓库 URL
+   - 点击「保存配置」
+   - 点击「授权验证」
+
+## 📖 使用教程
+
+### 基本操作
+
+1. **查看系统状态**
+   - 在插件界面查看授权状态
+   - 确认仓库连接正常
+   - 检查本地备份情况
+
+2. **管理压缩包**
+   - 点击「刷新列表」查看可用的压缩包
+   - 选择压缩包进行恢复、重命名或删除操作
+   - 使用「从压缩包恢复」功能恢复特定文件
+
+3. **备份管理**
+   - 查看本地备份列表
+   - 从备份恢复数据
+   - 删除不需要的备份
+
+### 数据恢复流程
+
+1. **选择数据源**
+   - 从 GitHub 仓库的压缩包恢复
+   - 从本地备份恢复
+
+2. **执行恢复**
+   - 系统自动创建当前数据的备份
+   - 下载并解压缩数据包
+   - 将数据恢复到 SillyTavern 目录
+
+3. **验证结果**
+   - 检查恢复状态
+   - 确认数据完整性
+
+## 🛡️ 安全特性
+
+- **自动备份**：每次恢复前自动备份当前数据
+- **权限验证**：严格的 GitHub 访问权限验证
+- **错误处理**：完善的错误处理和回滚机制
+- **数据校验**：压缩包完整性验证
+
+## 📁 支持的文件格式
+
+- **ZIP 格式**：标准的 ZIP 压缩包
+- **TAR.GZ 格式**：Gzip 压缩的 TAR 包
+- **自动识别**：根据文件扩展名自动选择解压方式
+
+## 🔍 故障排除
+
+### 常见问题
+
+1. **插件无法启动**
+   - 检查 Node.js 是否正确安装
+   - 确认 `npm install` 执行成功
+   - 验证 SillyTavern 配置文件
+
+2. **GitHub 连接失败**
+   - 检查网络连接
+   - 验证 Token 权限和有效性
+   - 确认仓库 URL 正确
+
+3. **数据恢复失败**
+   - 检查压缩包格式是否支持
+   - 确认磁盘空间充足
+   - 查看错误日志信息
+
+### 日志查看
+
+插件运行时会在控制台输出详细的日志信息，包含 `[laopobao-save]` 标识，可用于问题诊断。
+
+## 🤝 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 本仓库
+2. 创建功能分支
+3. 提交更改
+4. 发起 Pull Request
+
+## 📄 许可证
+
+本项目采用 MIT 许可证，详见 [LICENSE](LICENSE) 文件。
+
+## 🙏 致谢
+
+感谢 SillyTavern 社区的支持和贡献！
 
 ---
 
-## 🚀 开始使用：安装与配置步骤
-
-### 第一步：准备工作 (非常重要！)
-
-1.  **检查 SillyTavern 根目录 (不再需要删除文件)**:
-    *   *先前版本需要删除根目录的 `.git` 和 `.gitignore` 以避免冲突。*
-    *   *现在插件已更新，可以正确处理嵌套仓库，**不再需要**删除这些文件。保留根目录的 `.git` 对更新 SillyTavern 很重要。*
-    *   *如果你之前按照旧说明删除了根目录的 `.git` 文件夹，建议从备份或重新下载 SillyTavern 来恢复它，以便能正常更新 SillyTavern 本身。*
-2.  **修改 SillyTavern 配置**:
-    *   找到并用文本编辑器打开 SillyTavern 根目录下的 `config.yaml` 文件。
-    *   滚动到文件 **最末尾**，找到或添加以下两行，**修改或确保**它们的值如下设置：
-        ```yaml
-        enableServerPlugins: true
-        enableServerPluginsAutoUpdate: false
-        ```
-    *   *说明：`enableServerPlugins` 开启插件功能，`enableServerPluginsAutoUpdate` 设置为 `false` 可以避免潜在的自动更新冲突 (推荐)。*
-    *   保存并关闭 `config.yaml` 文件。
-3.  **安装必备软件**:
-    *   **Git**: 确保你的电脑或服务器上安装了 Git。可以在命令行输入 `git --version` 检查。如果没有安装，请根据你的操作系统（Windows/Linux/MacOS）访问 [Git 官网](https://git-scm.com/downloads) 下载并安装。
-    *   **Node.js 和 npm**: 这个插件需要 Node.js 环境来运行。安装 Node.js 通常会自动包含 npm (Node Package Manager)。
-        *   访问 [Node.js 官网](https://nodejs.org/) 下载并安装 LTS (长期支持) 版本。
-        *   安装完成后，可以在命令行输入 `node -v` 和 `npm -v` 来检查是否安装成功。
-
-### 第二步：安装插件并安装依赖
-
-1.  **获取插件代码** (选择一种方式):
-    *   **方式一：下载 Zip 包**:
-        *   访问插件 GitHub 仓库: [https://github.com/fuwei99/cloud-saves](https://github.com/fuwei99/cloud-saves)
-        *   点击 "Code" -> "Download ZIP"。
-        *   解压下载的 `cloud-saves-main.zip`。
-        *   将解压得到的 `cloud-saves` 文件夹（确保是这个名字）放入你 SillyTavern 根目录下的 `plugins` 文件夹内。路径看起来应该是 `SillyTavern/plugins/cloud-saves`。
-    *   **方式二：使用 Git Clone**:
-        *   打开命令行/终端。
-        *   `cd` 到你的 SillyTavern 根目录下的 `plugins` 文件夹 (例如 `cd path/to/SillyTavern/plugins`)。
-        *   运行命令：`git clone https://github.com/fuwei99/cloud-saves.git` 这会自动创建 `cloud-saves` 文件夹。
-2.  **安装插件依赖 (关键步骤!)**:
-    *   **打开命令行/终端**。
-    *   **`cd` 进入刚刚创建的插件目录**:
-        ```bash
-        cd path/to/SillyTavern/plugins/cloud-saves
-        ```
-        (请将 `path/to/SillyTavern` 替换为你实际的 SillyTavern 路径)
-    *   **运行安装命令**:
-        ```bash
-        npm install
-        ```
-    *   等待命令执行完成。它会自动下载并安装插件运行所需的库文件 (会创建一个 `node_modules` 文件夹)。如果看到 `WARN` 信息通常可以忽略，但如果看到 `ERR!` 则表示出错，需要检查 Node.js/npm 安装或网络连接。
-
-### 第三步：重启 SillyTavern
-
-*   关闭当前正在运行的 SillyTavern 服务 (如果正在运行)。
-*   重新启动 SillyTavern。这次启动会加载 `config.yaml` 的新设置并尝试加载 Cloud Saves 插件及其依赖。
-
-### 第四步：配置 Cloud Saves 插件
-
-1.  **打开插件界面**:
-    *   方法一：在 SillyTavern 界面左侧菜单找到 "Plugins" (或 "插件")，点击进入，然后选择 "Cloud Saves"。
-    *   方法二：**直接访问插件面板链接**: [`http://127.0.0.1:8000/api/plugins/cloud-saves/ui`](http://127.0.0.1:8000/api/plugins/cloud-saves/ui)
-        *   **注意**: 如果你的 SillyTavern 不是运行在默认的 `8000` 端口，请将上面链接中的 `8000` 修改为你实际使用的端口号。
-2.  **创建 GitHub 仓库**:
-    *   去 GitHub 创建一个新的仓库。**强烈建议设为私有 (Private)**！仓库名随意，例如 `sillytavern-saves`。你**不需要**初始化仓库（比如添加 README）。
-    *   复制仓库的 HTTPS URL (例如 `https://github.com/YourUsername/sillytavern-saves.git`)。
-3.  **创建 GitHub 令牌 (PAT)**:
-    *   访问 GitHub [个人访问令牌](https://github.com/settings/tokens) 页面。
-    *   生成一个新令牌 (推荐使用 Classic Token 以简化权限设置)。
-    *   **关键权限**: 必须授予令牌**至少 `repo` 权限**。
-    *   设置令牌有效期（推荐 "No expiration"）。
-    *   **复制并妥善保存好生成的令牌**！它只显示一次。
-4.  **在插件中填写信息**:
-    *   回到 Cloud Saves 插件界面，在 "仓库授权设置" (Repository Authorization Settings) 部分：
-        *   粘贴你的 **仓库 URL**。
-        *   粘贴你生成的 **GitHub 访问令牌**。
-        *   (可选) 输入 **显示名称** (方便区分是谁的操作)。
-        *   (可选) 设置 **分支** (默认 `main`，一般无需修改)。
-5.  **保存配置**:
-    *   点击 **"配置" (Configure)** 按钮。
-6.  **授权与连接 (含错误处理)**:
-    *   点击 **"授权并连接" (Authorize & Connect)** 按钮。
-    *   **如果连接成功**: 你会看到成功的提示，并且界面会显示仓库状态，表示配置完成！
-    *   **如果连接失败或报错**:
-        *   **首先尝试**: 点击 **"初始化仓库" (Initialize Repository)** 按钮。这个按钮会尝试在你本地的 SillyTavern `/data` 目录下创建 Git 仓库并进行必要的初始设置。
-        *   初始化成功后，**再次点击 "授权并连接"**。
-        *   如果仍然失败，请仔细检查：
-            *   你的 GitHub 令牌是否正确粘贴，并且没有过期？
-            *   令牌是否具有正确的 `repo` 权限？
-            *   仓库 URL 是否正确？
-            *   你的网络是否能正常访问 GitHub？
-            *   是否完成了 **第一步** 中的清理工作？
-            *   `npm install` 是否成功执行且没有报错？
-
-### 第五步：开始使用！
-
-一旦配置并连接成功，你就可以开始享受云存档带来的便利了：
-
-*   **创建新存档**：在 "创建新存档" (Create New Save) 区域输入名称和描述，点击 "保存当前状态" (Save Current State)。
-*   **加载存档**：在 "存档列表" (Save List) 中找到存档，点击下载图标 <i class="bi bi-cloud-download"></i>（**再次警告：会覆盖本地数据！**）。
-*   **管理存档**：使用列表中的编辑 <i class="bi bi-pencil"></i>、覆盖 <i class="bi bi-upload"></i>、删除 <i class="bi bi-trash"></i>、比较 <i class="bi bi-file-diff"></i> 等按钮。
-*   **设置自动存档**：在 "定时自动存档设置" (Scheduled Auto-Save Settings) 区域配置并启用。
-
----
-
-## 🔗 链接：
-
-*   **GitHub 仓库 (代码、详细说明、下载)**: [https://github.com/fuwei99/cloud-saves](https://github.com/fuwei99/cloud-saves)
-
-## 💬 反馈与支持：
-
-欢迎大家试用！如果你在使用中遇到任何问题，或者有功能建议，请直接在这个帖子下面回复，或者最好是在 GitHub 仓库的 [Issues](https://github.com/fuwei99/cloud-saves/issues) 页面提出。
-
-希望这个插件能对大家有所帮助！
+**注意**：使用本插件前请务必备份重要数据，数据恢复操作会覆盖现有文件。

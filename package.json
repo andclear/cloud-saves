@@ -1,7 +1,7 @@
 {
-  "name": "sillytavern-cloud-saves",
-  "version": "1.0.0",
-  "description": "SillyTavern的云存档插件，使用GitHub仓库管理存档。",
+  "name": "st-laopobao-save",
+  "version": "2.0.0",
+  "description": "ST-Laopobao-Save plugin for SillyTavern, manage character data through compressed archives.",
   "main": "index.js",
   "author": "Your Name / AI Assistant",
   "license": "MIT",
@@ -10,12 +10,20 @@
     "plugin",
     "cloud",
     "save",
-    "git",
+    "backup",
+    "restore",
     "github"
   ],
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "dependencies": {
     "express": "^4.17.1",
     "node-fetch": "^3.0.0",
-    "simple-git": "^3.27.0"
+    "@octokit/rest": "^20.0.0",
+    "yauzl": "^2.10.0",
+    "tar": "^6.2.0",
+    "archiver": "^6.0.0"
   }
 }
